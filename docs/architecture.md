@@ -44,6 +44,7 @@ left in.
 `obis.Laser` speaks SCPI. A `obis.transport.Transport` only moves lines: open, write a line, read
 a line with a timeout, flush, close. There are two transports:
 - `SerialTransport` wraps MATLAB's `serialport`.
+- `CoherentTransport` opens the port through Coherent Connection's own DLL (D9).
 - `SimulatedTransport` answers like the laser, keeps the state those commands change, and
   injects faults.
 
@@ -97,9 +98,25 @@ directions:
 ### D8. The GUI is a programmatic uifigure
 
 The window is built in code, as in DoricLED and SpinCam, so it can be read, reviewed and tested
-headless (`'Visible', false`). Mode and Power are pending until their Set button. Emission and
-EMISSION OFF act at once, and Esc is EMISSION OFF. A window that owns its laser disconnects it on
-close; an attached one never does.
+headless (`'Visible', false`). It follows Coherent Connection's laser panel (2026-10-06, at the
+operator's request): Start and Stop, Operating power (mW) typed, stepped or dragged, and Operating
+mode, each sent at once; Esc is Stop. A window that owns its laser disconnects it on close; an
+attached one never does. With `'Parent'` the same panel is built inside another GUI (a figure,
+panel, tab or grid layout), so a client such as `LuminoseHF` hosts the laser's panel rather than
+building laser controls of its own; closing it deletes only the panel.
+
+### D9. Coherent's DLL is the default way to the port
+
+`CoherentTransport` opens the port with `ConnectionLibrary.SerialCommunicator` from
+`CoherentConnectionLibrary.dll` (Coherent Connection 6, a .NET assembly built AnyCPU, so 64-bit
+MATLAB loads it), the serial code Coherent's own software uses. It is a line transport like the
+others, so handshaking, `MaxPowermW` and the log stay in `obis.Laser`. The DLL's higher-level
+`ConnectionLibrary.OBIS_Laser` (`Start`, `Stop`, `PowerLevel_AsReal_mW`, `OperatingMode_AsEnum`)
+is not used: it would bypass those limits, and its built-in simulator does not open outside
+Coherent Connection (`Simulator_Communicator.Open` throws a null reference), so it could not be
+tested here. `Driver` (`obis.config`) picks `'coherent'` when the DLL is in `DllFolder` (the Coherent
+Connection 6 install folder unless set, so another PC can point to its own copy), else
+`'serial'`.
 
 ## 3. Class overview
 
@@ -110,6 +127,7 @@ close; an attached one never does.
 | `obis.Calibration` | Setpoint/power table, interpolation both ways |
 | `obis.transport.Transport` | Abstract line transport |
 | `obis.transport.SerialTransport` | `serialport`, CR/LF, 115200 baud |
+| `obis.transport.CoherentTransport` | Coherent Connection's DLL (`SerialCommunicator`) |
 | `obis.transport.SimulatedTransport` | The laser without hardware, with fault injection |
 | `obis.gui.LaserApp`, `obis.app` | Control window |
 | `obis.config`, `obis.version`, `obis.listDevices` | Defaults (`setpref('obis', ...)`), version, port listing |
@@ -144,7 +162,7 @@ for figures and timers.
 
 ```
 +obis/                Laser, Mode, Calibration, app, config, listDevices, version
-+obis/+transport/     Transport, SerialTransport, SimulatedTransport
++obis/+transport/     Transport, SerialTransport, CoherentTransport, SimulatedTransport
 +obis/+gui/           LaserApp
 examples/             example_basic, example_bpod_softcode, example_calibration
 tests/                run_tests and test classes; hardware/ (manual, with permission)
@@ -156,6 +174,7 @@ docs/                 this file, scpi, api-reference, gui, bpod-integration, rig
 | Version | Date | What |
 |---|---|---|
 | 0.1.0 | 2026-10-05 | M1–M3: package, simulated laser, GUI, examples, docs, 71 tests. Moved out of `LuminoseHF` (`LaserModel`, the setpoint interpolation) |
+| 0.2.0 | 2026-10-06 | `CoherentTransport` and `Driver` (D9); the GUI laid out like Coherent Connection (Start, Stop, power, mode) and embeddable with `'Parent'` (D8); Scan selects the OBIS's port (`listDevices` `IsObis`, from the registry); connection, readback and log folded under Details, Connect scans, `DllFolder`, modes named as in Coherent Connection; `findPort` and `ExpectedWavelengthNm` for several lasers (by `WAVelength?`, ±5 nm: `*IDN?` names the Mini-Controller); the lamp in the laser's wavelength colour; 116 tests |
 
 Next:
 - **M4:** `LuminoseHF` uses `obis.Laser` and `obis.Calibration`.

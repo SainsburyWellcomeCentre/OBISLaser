@@ -1,19 +1,40 @@
 classdef LaserApp < handle
-% obis.gui.LaserApp is the control window for an obis.Laser (programmatic uifigure).
+% obis.gui.LaserApp is the control panel for an obis.Laser: start, stop, power and mode.
 %
 %   app = obis.gui.LaserApp()              owns a new obis.Laser (real laser); closing the
 %                                          window turns emission off and disconnects it
-%   app = obis.gui.LaserApp('Port', 'COM15', 'Transport', t, ...)
+%   app = obis.gui.LaserApp('Port', 'COM15', 'DllFolder', folder, ...)
 %                                          owns an obis.Laser built with these options
 %   app = obis.gui.LaserApp(laser)         attaches to an existing obis.Laser; closing the
-%                                          window never disconnects it
-%   app = obis.gui.LaserApp(..., 'Visible', false, 'AutoRefresh', false)
+%                                          panel never disconnects it
+%   app = obis.gui.LaserApp(..., 'Parent', container)
+%                                          builds the panel inside container (a figure,
+%                                          uipanel, uitab or uigridlayout of another GUI)
+%                                          instead of a window of its own
+%   app = obis.gui.LaserApp(..., 'Visible', false, 'AutoRefresh', false, 'ShowLog', false)
+%   app = obis.gui.LaserApp(..., 'ListDevices', fcn)   how ports are found (tests): fcn()
+%                                          returns a table like obis.listDevices
+%   app = obis.gui.LaserApp('ExpectedWavelengthNm', 488)   with several lasers, the one this
+%                                          panel is for: Connect finds its port
+%                                          (obis.findPort) and refuses any other laser
+%   app = obis.gui.LaserApp(..., 'Identify', fcn)   how Connect asks a port's laser (tests)
+%   app = obis.gui.LaserApp(..., 'SavePreferences', false)   a DLL folder chosen in the
+%                                          panel is not kept for next time (tests)
 %
-%   The window: port and Scan, Connect, the laser's identity and limits, Mode with Set mode,
-%   Max power (your limit), Power with Set power, the Emission switch, a readback of what
-%   the laser reports (every RefreshS while Auto refresh is ticked), a log, and EMISSION OFF
-%   (also the Esc key). Editing Mode or Power sends nothing until its Set button; the
-%   Emission switch and EMISSION OFF act at once. See docs/gui.md.
+%   Laid out like Coherent Connection's laser panel. The header shows the laser, its
+%   output power, mode and state, with Start and Stop; its lamp is the laser's wavelength
+%   colour, bright while emitting and dim while off. Connect finds the laser's port (Scan;
+%   with a Wavelength set, the port whose laser reports it: obis.findPort) and connects.
+%   The window's title names the laser connected, so two panels for two lasers are told
+%   apart. Operating power (mW) is applied at once: typed (Enter), stepped with the down
+%   and up arrows (by Step), or dragged on the slider, which spans 0 to Max power, your
+%   limit; the mode (CW:Power, CW:Current, Digital, Analog, Mixed) when chosen. Details
+%   (folded away at first) holds the connection: Wavelength (nm, 0 for any laser), port,
+%   Scan (obis.listDevices, which reads Windows' device list and sends nothing), driver
+%   (Coherent's DLL or MATLAB's serialport) and the folder holding Coherent's DLL (kept
+%   with setpref for next time); a readback of what the laser reports (every RefreshS
+%   while Auto refresh is ticked); and a log. Esc is Stop in a window of its own. See
+%   docs/gui.md.
 %
 %   Auto refresh starts ticked for an owned laser and unticked for an attached one: a
 %   protocol that sends commands from its own callbacks must not meet a readback in the
@@ -22,22 +43,25 @@ classdef LaserApp < handle
 %   Properties (read-only)
 %       Laser       the obis.Laser shown
 %       OwnsLaser   true when the app created it
-%       Figure      the uifigure
+%       Figure      the figure holding the panel (its own uifigure, or the host's)
+%       Root        the panel's outermost container (delete it to remove the panel)
 %       Controls    struct of components (for scripting and tests)
 %       LastError   text of the last error shown
 %       LastStatus  struct from the last readback (obis.Laser.status), or []
 %
 %   Methods
 %       refresh()   redraw every control from the laser object (no traffic)
+%       showDetails(tf)  unfold or fold away the connection, readback and log
 %       readback()  ask the laser for its live values and show them
-%       close()     close the window (disconnects only an owned laser)
+%       close()     close the panel (disconnects only an owned laser)
 %
 % See also obis.app, obis.Laser
 
     properties (SetAccess = private)
         Laser                 % the obis.Laser shown
         OwnsLaser = false     % the app created it
-        Figure = []           % the uifigure
+        Figure = []           % figure holding the panel
+        Root = []             % outermost container of the panel
         Controls = struct()   % components, for scripting and tests
         LastError = ''        % last error shown
         LastStatus = []       % last readback
@@ -49,21 +73,33 @@ classdef LaserApp < handle
 
     properties (Constant, Hidden)
         Danger = [0.80 0.10 0.10]
-        OnColour = [0.95 0.55 0.10]
-        OffColour = [0.55 0.55 0.55]
+        Go = [0.15 0.55 0.25]
+        OffColour = [0.55 0.55 0.55]  % the lamp while no laser (or wavelength) is known
+        DimFactor = 0.35              % the lamp's brightness while emission is off
+        Modes = {'CWP', 'CWC', 'Digital', 'Analog', 'Mixed'}
+        ModeLabels = {'CW:Power', 'CW:Current', 'Digital', 'Analog', 'Mixed'}
     end
 
     properties (Access = private)
         Listeners = {}
         Timer = []
         Closing = false
+        OwnsFigure = true
+        Grid = []             % the panel's main grid; its last row holds the details
         LogLines = {}
+        ListDevices = @obis.listDevices
+        ScanMessage = ''
+        PortChosen = false    % the port was picked by hand: Connect uses it as it is
+        SavePreferences = true
+        Identify = []         % fcn(port) -> the laser's wavelength, for obis.findPort (tests)
     end
 
     methods
         function obj = LaserApp(varargin)
             visible = true;
             autoRefresh = [];
+            parent = [];
+            showLog = [];
             if ~isempty(varargin) && isa(varargin{1}, 'obis.Laser')
                 laser = varargin{1};
                 varargin(1) = [];
@@ -79,6 +115,16 @@ classdef LaserApp < handle
                         visible = logical(varargin{k + 1});
                     case 'autorefresh'
                         autoRefresh = logical(varargin{k + 1});
+                    case 'parent'
+                        parent = varargin{k + 1};
+                    case 'showlog'
+                        showLog = logical(varargin{k + 1});
+                    case 'listdevices'
+                        obj.ListDevices = varargin{k + 1};
+                    case 'identify'
+                        obj.Identify = varargin{k + 1};
+                    case 'savepreferences'
+                        obj.SavePreferences = logical(varargin{k + 1});
                     otherwise
                         rest = [rest, varargin(k:min(k + 1, end))]; %#ok<AGROW>
                 end
@@ -86,15 +132,19 @@ classdef LaserApp < handle
             if owns
                 laser = obis.Laser(rest{:});
             elseif ~isempty(rest)
-                error('obis:LaserApp:invalidOption', ['Only ''Visible'' and ' ...
-                    '''AutoRefresh'' can be given when attaching to an existing laser.']);
+                error('obis:LaserApp:invalidOption', ['Only ''Visible'', ''AutoRefresh'', ' ...
+                    '''Parent'', ''ShowLog'', ''ListDevices'', ''Identify'' and ' ...
+                    '''SavePreferences'' can be given when attaching to an existing laser.']);
             end
             if isempty(autoRefresh)
                 autoRefresh = owns;
             end
+            if isempty(showLog)
+                showLog = isempty(parent);
+            end
             obj.Laser = laser;
             obj.OwnsLaser = owns;
-            obj.build(visible, autoRefresh);
+            obj.build(parent, visible, autoRefresh, showLog);
             ref = matlab.lang.WeakReference(obj);
             names = {'StateChanged', 'CommandCompleted'};
             for k = 1:numel(names)
@@ -119,7 +169,7 @@ classdef LaserApp < handle
         end
 
         function close(obj)
-            % close() closes the window; an owned laser is turned off and disconnected.
+            % close() closes the panel; an owned laser is turned off and disconnected.
             if obj.Closing
                 return
             end
@@ -133,51 +183,103 @@ classdef LaserApp < handle
             if obj.OwnsLaser && isvalid(obj.Laser)
                 obj.Laser.disconnect();
             end
-            if ~isempty(obj.Figure) && isvalid(obj.Figure)
-                delete(obj.Figure);
+            if obj.OwnsFigure
+                if ~isempty(obj.Figure) && isvalid(obj.Figure)
+                    delete(obj.Figure);
+                end
+            elseif ~isempty(obj.Root) && isvalid(obj.Root)
+                delete(obj.Root);
             end
         end
 
         function refresh(obj)
             % refresh() redraws every control from the laser object, with no traffic.
-            if obj.Closing || isempty(obj.Figure) || ~isvalid(obj.Figure)
+            if obj.Closing || isempty(obj.Root) || ~isvalid(obj.Root)
                 return
             end
             laser = obj.Laser;
             c = obj.Controls;
             ready = strcmp(laser.State, 'Ready');
+            disconnected = strcmp(laser.State, 'Disconnected');
             c.State.Text = laser.State;
             if strcmp(laser.State, 'Faulted')
                 c.State.Text = sprintf('Faulted: %s', laser.FaultReason);
             end
-            c.Connect.Text = ternary(strcmp(laser.State, 'Disconnected'), 'Connect', ...
-                'Disconnect');
-            c.Port.Enable = strcmp(laser.State, 'Disconnected');
-            c.Scan.Enable = c.Port.Enable;
-            if ready
-                c.Identity.Text = sprintf('%s   S/N %s   %g nm   limits %g-%g mW', ...
-                    laser.Identity.Model, laser.Identity.SerialNumber, ...
-                    laser.Identity.WavelengthNm, laser.DeviceMinPowermW, laser.DeviceMaxPowermW);
+            c.Connect.Text = ternary(disconnected, 'Connect', 'Disconnect');
+            c.Port.Enable = disconnected;
+            c.Scan.Enable = disconnected;
+            c.Driver.Enable = disconnected && obj.OwnsLaser;
+            c.Driver.Value = laser.Driver;
+            c.Wavelength.Value = max([laser.ExpectedWavelengthNm, 0]);
+            c.Wavelength.Enable = disconnected && obj.OwnsLaser;
+            c.DllFolder.Value = laser.DllFolder;
+            c.DllFolder.Enable = disconnected && obj.OwnsLaser;
+            c.Browse.Enable = c.DllFolder.Enable;
+            if obis.transport.CoherentTransport.isAvailable(laser.DllFolder)
+                c.DllStatus.Text = 'DLL found';
+                c.DllStatus.FontColor = [0.15 0.55 0.25];
             else
-                c.Identity.Text = 'Not connected';
+                c.DllStatus.Text = 'no DLL here';
+                c.DllStatus.FontColor = obj.Danger;
             end
-            for name = {'Mode', 'SetMode', 'MaxPower', 'Power', 'SetPower', 'Emission', ...
-                    'Readback'}
+            if ready
+                c.Name.Text = laserName(laser.Identity);
+                c.Identity.Text = sprintf('S/N %s   %g nm   laser limits %g-%g mW   %s', ...
+                    laser.Identity.SerialNumber, laser.Identity.WavelengthNm, ...
+                    laser.DeviceMinPowermW, laser.DeviceMaxPowermW, ...
+                    laser.Transport.Description);
+            elseif ~isempty(laser.ExpectedWavelengthNm)
+                c.Name.Text = sprintf('OBIS %g nm', laser.ExpectedWavelengthNm);
+                c.Identity.Text = strtrim(['Not connected. ' obj.ScanMessage]);
+            else
+                c.Name.Text = 'OBIS laser';
+                c.Identity.Text = strtrim(['Not connected. ' obj.ScanMessage]);
+            end
+            if obj.OwnsFigure && ~isempty(obj.Figure) && isvalid(obj.Figure)
+                obj.Figure.Name = c.Name.Text;
+            end
+            for name = {'Start', 'Mode', 'MaxPower', 'Power', 'PowerDown', 'PowerUp', ...
+                    'PowerSlider', 'Step', 'Readback'}
                 c.(name{1}).Enable = ready;
             end
             if ~isempty(laser.MaxPowermW)
+                top = max(laser.MaxPowermW, eps);
                 c.MaxPower.Value = laser.MaxPowermW;
-                c.Power.Limits = [0, max(laser.MaxPowermW, eps)];
+                c.Power.Limits = [0, top];
+                c.PowerSlider.Limits = [0, top];
             end
-            if ~isempty(laser.Mode) && ~c.SetMode.UserData
+            if ~isempty(laser.Mode)
                 c.Mode.Value = char(laser.Mode);
             end
-            if ~isempty(laser.CommandedPowermW) && ~c.SetPower.UserData
-                c.Power.Value = min(laser.CommandedPowermW, c.Power.Limits(2));
+            if ~isempty(laser.CommandedPowermW)
+                power = min(laser.CommandedPowermW, c.Power.Limits(2));
+                c.Power.Value = power;
+                c.PowerSlider.Value = power;
+                c.Percent.Text = percentText(laser.CommandedPowermW, laser.DeviceMaxPowermW);
             end
-            c.Emission.Value = ternary(laser.IsEnabled, 'On', 'Off');
-            c.EmissionLamp.Color = ternary(laser.IsEnabled, obj.OnColour, obj.OffColour);
+            on = laser.IsEnabled && ready;
+            c.EmissionLamp.Color = obj.lampColour(on);
+            c.Start.Text = ternary(on, 'Emitting', 'Start');
+            obj.showHeader();
             obj.showLog();
+        end
+
+        function showDetails(obj, tf)
+            % showDetails(tf) unfolds (true) or folds away (false) the readback and the log.
+            tf = logical(tf);
+            c = obj.Controls;
+            c.Details.Value = tf;
+            c.Details.Text = [char(ternary(tf, 9662, 9656)) '  Details'];
+            c.DetailsArea.Visible = tf;
+            extra = ternary(isempty(c.Log), 220, 380);  % px the details take
+            obj.Grid.RowHeight{end} = ternary(tf, ternary(isempty(c.Log), 'fit', '1x'), 0);
+            if obj.OwnsFigure && ~isempty(obj.Figure) && isvalid(obj.Figure)
+                position = obj.Figure.Position;
+                grow = ternary(tf, extra, -extra);
+                % grows downwards, keeping the title bar where it is, but never off screen
+                obj.Figure.Position = [position(1), max(position(2) - grow, 40), ...
+                    position(3), position(4) + grow];
+            end
         end
 
         function readback(obj)
@@ -190,98 +292,287 @@ classdef LaserApp < handle
     end
 
     methods (Access = private)
-        function build(obj, visible, autoRefresh)
-            % Lays out the window.
-            fig = uifigure('Name', 'OBIS laser', 'Position', [100 100 560 600], ...
-                'Visible', matlab.lang.OnOffSwitchState(visible), ...
-                'CloseRequestFcn', @(~, ~) obj.close(), ...
-                'KeyPressFcn', @(~, evt) obj.onKey(evt));
-            obj.Figure = fig;
-            grid = uigridlayout(fig, [6 1], 'RowHeight', {'fit', 'fit', 'fit', 'fit', '1x', 50});
+        function build(obj, parent, visible, autoRefresh, showLog)
+            % Lays out the panel, in a window of its own or inside parent.
+            if isempty(parent)
+                fig = uifigure('Name', 'OBIS laser', 'Position', [100 300 600 300], ...
+                    'Visible', matlab.lang.OnOffSwitchState(visible), ...
+                    'CloseRequestFcn', @(~, ~) obj.close(), ...
+                    'KeyPressFcn', @(~, evt) obj.onKey(evt));
+                obj.Figure = fig;
+                obj.OwnsFigure = true;
+                root = uigridlayout(fig, [1 1], 'Padding', [0 0 0 0]);
+            else
+                obj.Figure = ancestor(parent, 'figure');
+                obj.OwnsFigure = false;
+                root = uipanel(parent, 'Title', 'OBIS laser', 'FontWeight', 'bold');
+                if ~isa(parent, 'matlab.ui.container.GridLayout')
+                    root.Units = 'normalized';
+                    root.Position = [0 0 1 1];
+                end
+            end
+            obj.Root = root;
+            % The last row holds the details (connection, readback, log), folded away until
+            % Details opens
+            rows = {'fit', 'fit', 'fit', 'fit', 0};
+            grid = uigridlayout(root, [numel(rows) 1], 'RowHeight', rows, 'RowSpacing', 6);
+            obj.Grid = grid;
 
-            row = uigridlayout(grid, [1 5], 'ColumnWidth', {'fit', '1x', 'fit', 'fit', '2x'}, ...
+            % Header: the laser, what it is doing, Start and Stop
+            row = uigridlayout(grid, [1 6], 'ColumnWidth', {20, 'fit', '1x', 'fit', 75, 75}, ...
                 'Padding', [0 0 0 0]);
-            uilabel(row, 'Text', 'Port');
-            c.Port = uidropdown(row, 'Editable', 'on', 'Items', obj.portItems(), ...
-                'Value', obj.initialPort());
-            c.Scan = uibutton(row, 'Text', 'Scan', 'ButtonPushedFcn', @(~, ~) obj.onScan());
-            c.Connect = uibutton(row, 'Text', 'Connect', ...
-                'ButtonPushedFcn', @(~, ~) obj.onConnect());
+            c.EmissionLamp = uilamp(row, 'Color', obj.OffColour);
+            c.Name = uilabel(row, 'Text', 'OBIS laser', 'FontSize', 16, 'FontWeight', 'bold');
+            c.Readout = uilabel(row, 'Text', '', 'HorizontalAlignment', 'center', ...
+                'FontWeight', 'bold');
             c.State = uilabel(row, 'Text', 'Disconnected');
+            c.Start = uibutton(row, 'Text', 'Start', 'FontWeight', 'bold', ...
+                'FontColor', [1 1 1], 'BackgroundColor', obj.Go, ...
+                'ButtonPushedFcn', @(~, ~) obj.onStart());
+            c.Stop = uibutton(row, 'Text', 'Stop', 'FontWeight', 'bold', ...
+                'FontColor', [1 1 1], 'BackgroundColor', obj.Danger, ...
+                'Tooltip', 'Emission off, in any state (Esc)', ...
+                'ButtonPushedFcn', @(~, ~) obj.onStop());
 
-            c.Identity = uilabel(grid, 'Text', 'Not connected', 'WordWrap', 'on');
+            % Connect (it finds the port first) and what is connected
+            row = uigridlayout(grid, [1 2], 'ColumnWidth', {90, '1x'}, 'Padding', [0 0 0 0]);
+            c.Connect = uibutton(row, 'Text', 'Connect', 'Tooltip', ['Find the laser''s ' ...
+                'port and connect (the port can be chosen under Details)'], ...
+                'ButtonPushedFcn', @(~, ~) obj.onConnect());
+            c.Identity = uilabel(row, 'Text', 'Not connected', 'WordWrap', 'on', ...
+                'FontColor', [0.45 0.45 0.45]);
 
-            panel = uipanel(grid, 'Title', 'Settings');
-            inner = uigridlayout(panel, [4 4], 'ColumnWidth', {'fit', '1x', 'fit', 'fit'});
-            uilabel(inner, 'Text', 'Mode');
-            c.Mode = uidropdown(inner, 'Items', {'CWP', 'CWC', 'Digital', 'Analog', 'Mixed'}, ...
-                'ValueChangedFcn', @(~, ~) obj.markPending('SetMode'));
-            c.SetMode = uibutton(inner, 'Text', 'Set mode', 'UserData', false, ...
-                'ButtonPushedFcn', @(~, ~) obj.onSetMode());
-            uilabel(inner, 'Text', '');
+            panel = uipanel(grid, 'Title', 'Operating power');
+            inner = uigridlayout(panel, [4 6], 'ColumnWidth', {'fit', 34, 80, 34, 'fit', '1x'}, ...
+                'RowHeight', {'fit', 'fit', 'fit', 'fit'});
+            uilabel(inner, 'Text', 'Power (mW)');
+            c.PowerDown = uibutton(inner, 'Text', char(9660), 'Tooltip', 'Down by Step', ...
+                'ButtonPushedFcn', @(~, ~) obj.onStep(-1));
+            c.Power = uieditfield(inner, 'numeric', 'Limits', [0 1], ...
+                'ValueDisplayFormat', '%.2f', ...
+                'ValueChangedFcn', @(src, ~) obj.applyPower(src.Value));
+            c.PowerUp = uibutton(inner, 'Text', char(9650), 'Tooltip', 'Up by Step', ...
+                'ButtonPushedFcn', @(~, ~) obj.onStep(1));
+            uilabel(inner, 'Text', 'Step (mW)');
+            c.Step = uieditfield(inner, 'numeric', 'Value', 1, 'Limits', [0 Inf], ...
+                'LowerLimitInclusive', 'off');
+            c.Percent = uilabel(inner, 'Text', '');
+            c.PowerSlider = uislider(inner, 'Limits', [0 1], ...
+                'ValueChangedFcn', @(src, ~) obj.applyPower(src.Value));
+            c.PowerSlider.Layout.Column = [2 6];
             uilabel(inner, 'Text', 'Max power (mW)');
             c.MaxPower = uieditfield(inner, 'numeric', 'Limits', [0 Inf], ...
+                'Tooltip', 'Your limit: power above it is refused', ...
                 'ValueChangedFcn', @(src, ~) obj.onMaxPower(src.Value));
-            uilabel(inner, 'Text', 'your limit');
-            uilabel(inner, 'Text', '');
-            uilabel(inner, 'Text', 'Power (mW)');
-            c.Power = uispinner(inner, 'Limits', [0 1], 'Step', 1, ...
-                'ValueChangedFcn', @(~, ~) obj.markPending('SetPower'));
-            c.SetPower = uibutton(inner, 'Text', 'Set power', 'UserData', false, ...
-                'ButtonPushedFcn', @(~, ~) obj.onSetPower());
-            uilabel(inner, 'Text', '');
-            uilabel(inner, 'Text', 'Emission');
-            c.Emission = uiswitch(inner, 'Items', {'Off', 'On'}, 'Value', 'Off', ...
-                'ValueChangedFcn', @(src, ~) obj.onEmission(strcmp(src.Value, 'On')));
-            c.EmissionLamp = uilamp(inner, 'Color', obj.OffColour);
-            uilabel(inner, 'Text', '');
+            c.MaxPower.Layout.Column = [2 3];
+            note = uilabel(inner, 'Text', 'your limit; the slider ends here', ...
+                'FontColor', [0.45 0.45 0.45]);
+            note.Layout.Column = [4 6];
+            uilabel(inner, 'Text', 'Mode');
+            c.Mode = uidropdown(inner, 'Items', obj.ModeLabels, 'ItemsData', obj.Modes, ...
+                'ValueChangedFcn', @(src, ~) obj.onMode(src.Value));
+            c.Mode.Layout.Column = [2 4];
 
-            panel = uipanel(grid, 'Title', 'Readback');
+            c.Details = uibutton(grid, 'state', 'Text', [char(9656) '  Details'], ...
+                'Value', false, 'HorizontalAlignment', 'left', ...
+                'Tooltip', 'Show or hide the connection, the readback and the log', ...
+                'ValueChangedFcn', @(src, ~) obj.showDetails(src.Value));
+            if showLog
+                details = uigridlayout(grid, [3 1], 'RowHeight', {'fit', 'fit', '1x'}, ...
+                    'Padding', [0 0 0 0], 'Visible', 'off');
+            else
+                details = uigridlayout(grid, [2 1], 'RowHeight', {'fit', 'fit'}, ...
+                    'Padding', [0 0 0 0], 'Visible', 'off');
+            end
+            c.DetailsArea = details;
+
+            panel = uipanel(details, 'Title', 'Connection');
+            inner = uigridlayout(panel, [3 5], 'ColumnWidth', {'fit', '1x', 'fit', 'fit', ...
+                'fit'}, 'RowHeight', {'fit', 'fit', 'fit'});
+            uilabel(inner, 'Text', 'Wavelength (nm)');
+            c.Wavelength = uieditfield(inner, 'numeric', 'Limits', [0 Inf], 'Value', 0, ...
+                'Tooltip', ['With several lasers, the one this panel is for (0: any). ' ...
+                'Connect then finds its port.'], ...
+                'ValueChangedFcn', @(src, ~) obj.onWavelength(src.Value));
+            note = uilabel(inner, 'Text', '0: any laser', 'FontColor', [0.45 0.45 0.45]);
+            note.Layout.Column = [3 5];
+            uilabel(inner, 'Text', 'Port');
+            c.Port = uidropdown(inner, 'Editable', 'on', 'Items', {''}, 'Value', '', ...
+                'ValueChangedFcn', @(~, ~) obj.onPortChosen());
+            c.Scan = uibutton(inner, 'Text', 'Scan', 'Tooltip', ['List the ports and select ' ...
+                'the OBIS laser''s'], 'ButtonPushedFcn', @(~, ~) obj.onScan());
+            uilabel(inner, 'Text', 'Driver');
+            c.Driver = uidropdown(inner, 'Items', {'Coherent DLL', 'serialport'}, ...
+                'ItemsData', {'coherent', 'serial'}, 'Value', obj.Laser.Driver, ...
+                'ValueChangedFcn', @(src, ~) obj.onDriver(src.Value));
+            uilabel(inner, 'Text', 'DLL folder');
+            c.DllFolder = uieditfield(inner, 'text', 'Value', obj.Laser.DllFolder, ...
+                'Tooltip', 'The folder holding CoherentConnectionLibrary.dll', ...
+                'ValueChangedFcn', @(src, ~) obj.onDllFolder(src.Value));
+            c.Browse = uibutton(inner, 'Text', 'Browse...', ...
+                'ButtonPushedFcn', @(~, ~) obj.onBrowse());
+            c.DllStatus = uilabel(inner, 'Text', '');
+            c.DllStatus.Layout.Column = [4 5];
+
+            panel = uipanel(details, 'Title', 'Readback');
             inner = uigridlayout(panel, [1 3], 'ColumnWidth', {'1x', 'fit', 'fit'});
-            c.ReadbackText = uilabel(inner, 'Text', '-');
+            c.ReadbackText = uilabel(inner, 'Text', '-', 'WordWrap', 'on');
             c.Readback = uibutton(inner, 'Text', 'Read now', ...
                 'ButtonPushedFcn', @(~, ~) obj.readback());
             c.AutoRefresh = uicheckbox(inner, 'Text', 'Auto refresh', 'Value', autoRefresh, ...
                 'ValueChangedFcn', @(src, ~) obj.onAutoRefresh(src.Value));
 
-            c.Log = uitextarea(grid, 'Editable', 'off', 'FontName', 'Consolas');
-
-            c.StopAll = uibutton(grid, 'Text', 'EMISSION OFF  (Esc)', 'FontSize', 16, ...
-                'FontWeight', 'bold', 'FontColor', [1 1 1], 'BackgroundColor', obj.Danger, ...
-                'ButtonPushedFcn', @(~, ~) obj.onStopAll());
+            if showLog
+                c.Log = uitextarea(details, 'Editable', 'off', 'FontName', 'Consolas');
+            else
+                c.Log = [];
+            end
             obj.Controls = c;
-        end
-
-        function items = portItems(~)
-            % The serial ports Windows offers now.
-            try
-                items = cellstr(serialportlist("all"));
-            catch
-                items = {};
-            end
-            if isempty(items)
-                items = {''};
-            end
-        end
-
-        function port = initialPort(obj)
-            % The laser's port, else the first one listed.
-            port = obj.Laser.Port;
-            if isempty(port)
-                items = obj.portItems();
-                port = items{1};
-            end
+            obj.scanPorts(~isempty(obj.Laser.Port));
         end
 
         function onScan(obj)
-            % Lists the ports again.
-            obj.Controls.Port.Items = obj.portItems();
+            % Lists the ports again and selects the OBIS's.
+            obj.PortChosen = false;
+            obj.scanPorts(false);
+            obj.refresh();
+        end
+
+        function findLaserPort(obj)
+            % Selects the port whose laser is ExpectedWavelengthNm (obis.findPort).
+            laser = obj.Laser;
+            options = {'WavelengthNm', laser.ExpectedWavelengthNm, 'Driver', laser.Driver, ...
+                'DllFolder', laser.DllFolder, 'ListDevices', obj.ListDevices};
+            if ~isempty(obj.Identify)
+                options = [options, {'Identify', obj.Identify}];
+            end
+            port = obis.findPort(options{:});
+            obj.scanPorts(false);  % the list, and the note on what was found
+            items = obj.Controls.Port.Items;
+            if ~ismember(port, items)
+                obj.Controls.Port.Items = [items, {port}];
+            end
+            obj.Controls.Port.Value = port;
+            obj.ScanMessage = sprintf('Found the %g nm laser on %s.', ...
+                laser.ExpectedWavelengthNm, port);
+        end
+
+        function onWavelength(obj, nm)
+            % The laser this panel is for (0: any).
+            if nm == 0
+                nm = [];
+            end
+            obj.guard(@() setProperty(obj.Laser, 'ExpectedWavelengthNm', nm));
+            obj.refresh();
+        end
+
+        function onPortChosen(obj)
+            % A port picked by hand: Connect uses it without scanning.
+            obj.PortChosen = true;
+        end
+
+        function onDllFolder(obj, folder)
+            % Uses folder for the DLL; with the DLL there, the DLL driver too. Kept for
+            % next time (setpref) unless SavePreferences is false.
+            folder = strtrim(char(folder));
+            if ~obj.guard(@() setProperty(obj.Laser, 'DllFolder', folder))
+                obj.refresh();
+                return
+            end
+            if obis.transport.CoherentTransport.isAvailable(folder)
+                obj.guard(@() setProperty(obj.Laser, 'Driver', 'coherent'));
+                if obj.SavePreferences
+                    setpref('obis', 'DllFolder', folder);
+                end
+            end
+            obj.refresh();
+        end
+
+        function onBrowse(obj)
+            % Asks for the folder holding CoherentConnectionLibrary.dll.
+            start = obj.Laser.DllFolder;
+            if ~isfolder(start)
+                start = pwd;
+            end
+            folder = uigetdir(start, 'Folder holding CoherentConnectionLibrary.dll');
+            if ~isequal(folder, 0)
+                obj.onDllFolder(folder);
+            end
+        end
+
+        function scanPorts(obj, keepPort)
+            % Lists the ports and selects the laser's own (keepPort), else the OBIS's found.
+            try
+                devices = obj.ListDevices();
+            catch err
+                devices = table({}, false(0, 1), false(0, 1), {}, {}, 'VariableNames', ...
+                    {'Port', 'Available', 'IsObis', 'Description', 'Idn'});
+                obj.ScanMessage = sprintf('Could not list the ports: %s', err.message);
+            end
+            items = cellstr(devices.Port(:)');
+            found = devices(devices.IsObis, :);
+            if keepPort
+                port = obj.Laser.Port;
+                obj.ScanMessage = '';
+            elseif isempty(found)
+                port = obj.Controls.Port.Value;
+                if isempty(port) && ~isempty(items)
+                    port = items{1};
+                end
+                if isempty(devices.Port)
+                    obj.ScanMessage = 'No serial ports: is the laser plugged in and on?';
+                else
+                    obj.ScanMessage = ['No OBIS found among the ports (an OBIS Remote or a ' ...
+                        'USB-serial adapter is not recognised): choose its port.'];
+                end
+            else
+                allFound = found;
+                free = found(found.Available, :);
+                if ~isempty(free)
+                    found = free;
+                end
+                port = found.Port{1};
+                obj.ScanMessage = sprintf('Found %s.', describe(found.Port{1}, ...
+                    found.Description{1}));
+                if height(allFound) > 1
+                    obj.ScanMessage = sprintf(['%s %d OBIS ports found (%s): check it is ' ...
+                        'the right one.'], obj.ScanMessage, height(allFound), ...
+                        strjoin(allFound.Port, ', '));
+                end
+                if ~found.Available(1)
+                    obj.ScanMessage = [obj.ScanMessage ' It is in use by another program ' ...
+                        '(close Coherent Connection).'];
+                end
+            end
+            if ~isempty(port) && ~ismember(port, items)
+                items{end + 1} = port;
+            end
+            if isempty(items)
+                items = {''};
+                port = '';
+            end
+            obj.Controls.Port.Items = items;
+            obj.Controls.Port.Value = port;
+        end
+
+        function onDriver(obj, driver)
+            % Chooses how the port is opened at the next Connect.
+            obj.guard(@() setProperty(obj.Laser, 'Driver', driver));
+            obj.refresh();
         end
 
         function onConnect(obj)
-            % Connects, or disconnects when connected.
+            % Finds the port (unless picked by hand) and connects; disconnects when connected.
             laser = obj.Laser;
             if strcmp(laser.State, 'Disconnected')
+                if ~obj.PortChosen && ~isempty(laser.ExpectedWavelengthNm)
+                    if ~obj.guard(@() obj.findLaserPort())
+                        obj.refresh();
+                        return
+                    end
+                elseif ~obj.PortChosen
+                    obj.scanPorts(false);
+                end
                 obj.guard(@() connectTo(laser, obj.Controls.Port.Value, ...
                     isa(laser.Transport, 'obis.transport.SimulatedTransport')));
             else
@@ -291,44 +582,48 @@ classdef LaserApp < handle
             obj.readback();
         end
 
-        function onSetMode(obj)
-            % Sends the chosen mode.
-            if obj.guard(@() obj.Laser.setMode(obj.Controls.Mode.Value))
-                obj.clearPending('SetMode');
+        function onStart(obj)
+            % Emission on.
+            obj.guard(@() obj.Laser.setEnabled(true));
+            obj.refresh();
+        end
+
+        function onStop(obj)
+            % Emission off, whatever else is happening.
+            if ~obj.Laser.stopAll() && ~strcmp(obj.Laser.State, 'Disconnected')
+                obj.showError('Stop was not confirmed by the laser. Check it by eye.');
             end
+            obj.refresh();
+        end
+
+        function onStep(obj, direction)
+            % One Step down (-1) or up (+1) from the power shown.
+            target = obj.Controls.Power.Value + direction * obj.Controls.Step.Value;
+            obj.applyPower(min(max(target, 0), obj.Controls.Power.Limits(2)));
+        end
+
+        function applyPower(obj, mW)
+            % Sends a power at once; a refusal puts the last accepted one back.
+            obj.guard(@() obj.Laser.setPower(mW));
+            obj.refresh();
+        end
+
+        function onMode(obj, mode)
+            % Sends the chosen mode at once; a refusal puts the last one back.
+            obj.guard(@() obj.Laser.setMode(mode));
+            obj.refresh();
         end
 
         function onMaxPower(obj, value)
             % Changes your limit (no traffic).
-            obj.guard(@() setMaxPower(obj.Laser, value));
-            obj.refresh();
-        end
-
-        function onSetPower(obj)
-            % Sends the chosen power.
-            if obj.guard(@() obj.Laser.setPower(obj.Controls.Power.Value))
-                obj.clearPending('SetPower');
-            end
-        end
-
-        function onEmission(obj, tf)
-            % Turns emission on or off at once.
-            obj.guard(@() obj.Laser.setEnabled(tf));
-            obj.refresh();
-        end
-
-        function onStopAll(obj)
-            % Emission off, whatever else is happening.
-            if ~obj.Laser.stopAll() && ~strcmp(obj.Laser.State, 'Disconnected')
-                obj.showError('EMISSION OFF was not confirmed by the laser. Check it by eye.');
-            end
+            obj.guard(@() setProperty(obj.Laser, 'MaxPowermW', value));
             obj.refresh();
         end
 
         function onKey(obj, evt)
-            % Esc is EMISSION OFF.
+            % Esc is Stop.
             if strcmp(evt.Key, 'escape')
-                obj.onStopAll();
+                obj.onStop();
             end
         end
 
@@ -342,26 +637,56 @@ classdef LaserApp < handle
         end
 
         function doReadback(obj)
-            % One status() read, shown in the Readback panel.
+            % One status() read, shown in the Readback panel and the header.
             s = obj.Laser.status();
             obj.LastStatus = s;
             obj.Controls.ReadbackText.Text = sprintf(['%s, %s   setpoint %.2f mW   output ' ...
                 '%.2f mW   %.1f C   status %s   fault %s'], ternary(s.IsEnabled, 'on', ...
                 'off'), char(s.Mode), s.SetpointmW, s.OutputmW, s.BaseplateC, s.StatusCode, ...
                 s.FaultCode);
+            obj.showHeader();
         end
 
-        function markPending(obj, button)
-            % Shows that a Set button has a change waiting.
-            obj.Controls.(button).UserData = true;
-            obj.Controls.(button).FontWeight = 'bold';
+        function colour = lampColour(obj, on)
+            % The laser's wavelength colour: full while emitting, dimmed while off, grey
+            % when no wavelength is known (nothing connected and none expected).
+            laser = obj.Laser;
+            nm = NaN;
+            if strcmp(laser.State, 'Ready')
+                nm = laser.Identity.WavelengthNm;
+            elseif ~isempty(laser.ExpectedWavelengthNm)
+                nm = laser.ExpectedWavelengthNm;
+            end
+            if isnan(nm)
+                colour = obj.OffColour;
+            elseif on
+                colour = obis.gui.LaserApp.wavelengthColour(nm);
+            else
+                colour = obj.DimFactor * obis.gui.LaserApp.wavelengthColour(nm);
+            end
         end
 
-        function clearPending(obj, button)
-            % The change was sent.
-            obj.Controls.(button).UserData = false;
-            obj.Controls.(button).FontWeight = 'normal';
-            obj.refresh();
+        function showHeader(obj)
+            % The header's readout: output (last read, else the setpoint) and mode.
+            laser = obj.Laser;
+            c = obj.Controls;
+            if ~strcmp(laser.State, 'Ready')
+                c.Readout.Text = '';
+                return
+            end
+            s = obj.LastStatus;
+            if ~isempty(s)
+                power = sprintf('%.1f mW', s.OutputmW);
+            elseif ~isempty(laser.CommandedPowermW)
+                power = sprintf('set %.1f mW', laser.CommandedPowermW);
+            else
+                power = '';
+            end
+            mode = '';
+            if ~isempty(laser.Mode)
+                mode = obj.ModeLabels{strcmp(obj.Modes, char(laser.Mode))};
+            end
+            c.Readout.Text = sprintf('%s   %s', power, mode);
         end
 
         function ok = guard(obj, action)
@@ -376,17 +701,25 @@ classdef LaserApp < handle
         end
 
         function showError(obj, message)
-            % Shows an error in the log and, when the window is visible, as an alert.
+            % Shows an error in the log and, when the panel is visible, as an alert.
             obj.LastError = message;
             obj.LogLines{end + 1} = ['ERROR: ' message];
             obj.showLog();
-            if ~isempty(obj.Figure) && isvalid(obj.Figure) && strcmp(obj.Figure.Visible, 'on')
-                uialert(obj.Figure, message, 'OBIS laser');
+            fig = obj.Figure;
+            if ~isempty(fig) && isvalid(fig) && strcmp(fig.Visible, 'on')
+                try
+                    uialert(fig, message, 'OBIS laser');
+                catch
+                    warndlg(message, 'OBIS laser');  % a host figure that takes no uialert
+                end
             end
         end
 
         function showLog(obj)
             % The last commands from the laser's log, newest last, with errors shown here.
+            if isempty(obj.Controls.Log)
+                return
+            end
             entries = obj.Laser.log();
             lines = {};
             first = max(1, height(entries) - 30);
@@ -398,9 +731,42 @@ classdef LaserApp < handle
         end
     end
 
+    methods (Static)
+        function rgb = wavelengthColour(nm)
+            % rgb = obis.gui.LaserApp.wavelengthColour(nm) is the colour of light of nm.
+            %
+            %   Visible light (380-780 nm) after Bruton's approximation, gamma 0.8, dimmed
+            %   towards both ends where the eye sees less. Outside it, the nearest end's
+            %   colour, so a UV or IR laser still gets a lamp that can be seen.
+            nm = min(max(nm, 380), 780);
+            if nm < 440
+                rgb = [(440 - nm) / 60, 0, 1];
+            elseif nm < 490
+                rgb = [0, (nm - 440) / 50, 1];
+            elseif nm < 510
+                rgb = [0, 1, (510 - nm) / 20];
+            elseif nm < 580
+                rgb = [(nm - 510) / 70, 1, 0];
+            elseif nm < 645
+                rgb = [1, (645 - nm) / 65, 0];
+            else
+                rgb = [1, 0, 0];
+            end
+            if nm < 420
+                factor = 0.3 + 0.7 * (nm - 380) / 40;
+            elseif nm > 700
+                factor = 0.3 + 0.7 * (780 - nm) / 80;
+            else
+                factor = 1;
+            end
+            % keeps a little light at the ends, so the lamp is never black
+            rgb = max((factor * rgb) .^ 0.8, 0.1);
+        end
+    end
+
     methods (Static, Hidden)
         function onLaserEvent(ref)
-            % A laser event redraws the window, if it still exists.
+            % A laser event redraws the panel, if it still exists.
             app = ref.Handle;
             if ~isempty(app) && isvalid(app)
                 app.refresh();
@@ -431,9 +797,37 @@ laser.connect();
 end
 
 
-function setMaxPower(laser, value)
-% Sets the laser's MaxPowermW.
-laser.MaxPowermW = value;
+function text = describe(port, name)
+% 'COM15 (Coherent OBIS Device)', or the port alone when Windows gives no name.
+text = port;
+name = strtrim(erase(name, ['(' port ')']));
+if ~isempty(name)
+    text = sprintf('%s (%s)', port, name);
+end
+end
+
+
+function name = laserName(identity)
+% The model, or 'OBIS 489 nm' behind an OBIS Remote, whose MODel? names the controller.
+name = identity.Model;
+if isempty(name) || contains(name, 'CONTROLLER', 'IgnoreCase', true)
+    name = sprintf('OBIS %g nm', identity.WavelengthNm);
+end
+end
+
+
+function setProperty(object, name, value)
+% Sets a property, for guard.
+object.(name) = value;
+end
+
+
+function text = percentText(mW, deviceMaxmW)
+% The power as a share of the laser's own maximum.
+text = '';
+if ~isempty(deviceMaxmW) && deviceMaxmW > 0
+    text = sprintf('%.1f%% of the laser''s max', 100 * mW / deviceMaxmW);
+end
 end
 
 

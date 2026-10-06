@@ -12,6 +12,14 @@ None of these have been run. Do them in order, with the beam blocked (a power me
 path is ideal) and Coherent Connection closed. `tests/hardware/checkLaser.m` runs steps 1–5 and
 prints what to record.
 
+### 0. Which laser is on which port (two lasers, 2026-10-06)
+
+Windows lists two Coherent OBIS USB ports, `COM8` and `COM15`, each an OBIS Mini-Controller
+(Log, 2026-10-06). COM15 is the 488 nm laser (it answered `WAVelength?` 489 on 2026-10-05); COM8
+is the 561 nm laser (the operator, 2026-10-06; not yet asked). Still to do: `[~, found] =
+obis.findPort('WavelengthNm', 1)` sends only `SYSTem:INFormation:WAVelength?` to the two ports;
+check COM8 answers about 561 and that `findPort('WavelengthNm', 561)` returns COM8.
+
 ### 1. Connection and replies
 
 `connect()` on `COM15`. Record:
@@ -19,6 +27,10 @@ prints what to record.
 - the `*IDN?` text, model, serial number and wavelength
 - `LIMit:HIGH` and `LIMit:LOW`
 - the mode and setpoint read back
+- which driver ran (`laser.Driver`): run this step with `'Driver', 'coherent'` (Coherent
+  Connection's DLL, the default where it is installed) and again with `'Driver', 'serial'`; both
+  must give the same replies. If the DLL's `ReadOneLine` strips or adds anything to a line, record
+  it here and in `scpi.md`
 
 Then compare the `log()` latencies with `docs/scpi.md`. Turn each *verify* there that this
 confirms into **rig** with the date.
@@ -67,6 +79,20 @@ During a `LuminoseHF` session, read `LatencyMs` from the saved `record()` for ev
 - The Set buttons going bold and back.
 
 ## Log
+
+### 2026-10-06: `*IDN?` on both OBIS ports through Coherent's DLL (operator approved)
+
+Coherent Connection closed. `obis.transport.CoherentTransport` on `COM8`, then `COM15`: open,
+`*IDN?`, read every line, close. Nothing else was sent.
+
+- **The DLL transport works on the rig:** `open`, `writeLine` and `readLine` behaved as with
+  `serialport`; replies arrive without their terminator; both ports closed.
+- Both answered `Coherent, Inc. - OBIS MINI-CONTROLLER - v2.0.2 - 20120416`, then `OK`
+  (handshaking already on). Each laser sits behind its own Mini-Controller, so `*IDN?` (like
+  `MODel?`, 2026-10-05) names the controller and cannot tell the lasers apart: `obis.findPort`
+  now asks `WAVelength?`, which reaches the laser, and matches within 5 nm (COM15 reports 489
+  for its 488 nm laser).
+- `obis.listDevices` marked both as `IsObis`, `Available`, "Coherent OBIS Device (COMx)".
 
 ### 2026-10-05: read-only probe after `connect` failed (operator approved)
 

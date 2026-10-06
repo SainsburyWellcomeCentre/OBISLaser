@@ -19,8 +19,11 @@ closed-loop experiments.
   error that carries the laser's own code.
 - **Safe by default:** emission is turned off when you connect, disconnect, delete the object or
   close the window. Power above your own limit is refused, never reduced.
-- **A control window:** connect, choose the mode and power, use the emission switch, read back
-  live values, and press a large **EMISSION OFF** button (Esc does the same).
+- **A control panel:** laid out like Coherent Connection's: **Start**, **Stop** (Esc does the
+  same), Operating power in mW (typed, stepped with arrows or dragged) and Operating mode. It
+  opens as a window of its own or inside another program's window.
+- **Coherent's own DLL:** the port is opened through Coherent Connection's
+  `CoherentConnectionLibrary.dll` when it is installed, else through MATLAB's `serialport`.
 - **Calibration:** convert between setpoint and power measured at the sample, in either
   direction. Values outside the measured table are refused.
 - **A simulated laser:** code that uses the laser can be developed and tested without hardware.
@@ -31,6 +34,9 @@ closed-loop experiments.
 
 - Windows 10/11, 64-bit
 - MATLAB R2025b (the only release tested), base MATLAB only: `serialport` is built in
+- Optional: Coherent Connection 6 installed (its DLL is then used to open the port; close the
+  program itself before connecting). With the DLL somewhere else, point to its folder once:
+  **Details > DLL folder** in the control panel, or `setpref('obis', 'DllFolder', folder)`
 - A Coherent OBIS laser connected by USB (it appears as a COM port) or through an OBIS Remote
 - No other program holding the port (close Coherent Connection)
 
@@ -43,7 +49,8 @@ closed-loop experiments.
    ```
 3. Optionally, store your laser's port so you never have to type it:
    ```matlab
-   obis.listDevices()                  % ports Windows sees; ('Probe', true) asks each *IDN?
+   obis.listDevices()                  % ports Windows sees; IsObis marks the laser's
+                                       % ('Probe', true) also asks each *IDN?
    setpref('obis', 'Port', 'COM15')
    ```
 4. Check the installation without touching the hardware:
@@ -88,12 +95,14 @@ They run on the simulated laser as they are; set `useHardware = true` to drive t
 ## Control window
 
 ```matlab
-obis.app()           % opens the window; it owns its own laser connection
-obis.app(laser)      % controls a laser you already connected (leaves it connected on close)
+obis.app()                      % opens the window; it owns its own laser connection
+obis.app(laser)                 % controls a laser you already connected (left connected on close)
+obis.app(laser, 'Parent', tab)  % the same panel inside your own window (a tab, panel or grid)
 ```
 
-Editing Mode or Power sends nothing until you press its **Set** button. The **Emission** switch and
-**EMISSION OFF** (or Esc) act at once. See [docs/gui.md](docs/gui.md).
+**Start**, **Stop** (or Esc), the power and the mode act at once. With two lasers, open one
+window per laser and name it by wavelength, `obis.app('ExpectedWavelengthNm', 488)`: Connect finds
+that laser's port (`obis.findPort`) and refuses any other. See [docs/gui.md](docs/gui.md).
 
 ## Testing without hardware
 

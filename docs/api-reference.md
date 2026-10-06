@@ -14,9 +14,10 @@ laser = obis.Laser('Transport', obis.transport.SimulatedTransport())
 laser = obis.Laser(..., 'MaxPowermW', 50, 'TimeoutS', 2, 'Verbose', true)
 ```
 
-The constructor never touches the hardware. With no `Transport`, `connect` builds a
-`SerialTransport` on `Port` at `BaudRate`, and both default from `obis.config` (`setpref('obis',
-'Port', ...)`).
+The constructor never touches the hardware. With no `Transport`, `connect` opens `Port` with the
+`Driver`: `'coherent'` builds a `CoherentTransport` (Coherent Connection's DLL), `'serial'` a
+`SerialTransport` at `BaudRate`; the DLL is looked for in `DllFolder`. All default from `obis.config` (`setpref('obis', 'Port',
+...)`); `Driver` defaults to `'coherent'` when Coherent Connection 6 is installed.
 
 ### Properties
 
@@ -31,7 +32,8 @@ The constructor never touches the hardware. With no `Transport`, `connect` build
 | `CommandedPowermW` | read | setpoint read at connect or last accepted |
 | `IsEnabled` | read | emission state last accepted (off after connect) |
 | `IsBusy` | read | a command waits for its answer |
-| `Port`, `BaudRate` | read/write | settable only while Disconnected (`obis:Laser:portLocked`) |
+| `ExpectedWavelengthNm` | read/write | the laser meant when there are several (`[]`: any). `connect` reads the wavelength and refuses another laser (`obis:Laser:wrongLaser`) before sending it any command; settable only while Disconnected |
+| `Port`, `BaudRate`, `Driver`, `DllFolder` | read/write | settable only while Disconnected (`obis:Laser:portLocked`); `Driver` is `'coherent'` or `'serial'`; `DllFolder` is where `CoherentConnectionLibrary.dll` is, for `'coherent'` |
 | `MaxPowermW` | read/write | your limit; defaults to `DeviceMaxPowermW` at connect |
 | `TimeoutS` | read/write | wait for each answer (default 2) |
 | `Verbose` | read/write | print each command and reply |
@@ -73,7 +75,8 @@ The constructor never touches the hardware. With no `Transport`, `connect` build
 | `obis:Laser:limitBelowCommanded` | `MaxPowermW` below the setpoint already commanded |
 | `obis:Laser:useSetPower` | `command()` given a power command |
 | `obis:Laser:busy` | a command while another waits for its answer |
-| `obis:Laser:portLocked` | `Port`/`BaudRate` changed while connected |
+| `obis:Laser:portLocked` | `Port`/`BaudRate`/`Driver`/`DllFolder`/`ExpectedWavelengthNm` changed while connected |
+| `obis:Laser:wrongLaser` | the laser on the port is not `ExpectedWavelengthNm` (nothing but queries was sent) |
 | `obis:Laser:invalidOption` | unknown constructor option |
 
 ## `obis.Mode` (enumeration)
@@ -112,9 +115,10 @@ Errors:
 
 | Function | Does |
 |---|---|
+| `[port, found] = obis.findPort('WavelengthNm', nm)` | the free Coherent USB port whose laser reports `nm` to `SYSTem:INFormation:WAVelength?` (within `obis.Laser.WavelengthToleranceNm`, 5 nm) (only Coherent ports that no program holds are asked); without a wavelength, the first free one and no traffic. `found`: the ports asked, their `Idn` and `WavelengthNm`. Errors `obis:findPort:notFound` naming the lasers it did find. Options `Driver`, `DllFolder`, `TimeoutS` |
 | `obis.app(...)` | opens `obis.gui.LaserApp` (see [`gui.md`](gui.md)) |
-| `obis.config(...)` | `RootDir`, `Port`, `BaudRate`, `Version`; preferences `setpref('obis', ...)` |
-| `obis.listDevices()` | table `Port`, `Available`, `Idn`; `('Probe', true)` sends `*IDN?` to each free port |
+| `obis.config(...)` | `RootDir`, `Port`, `BaudRate`, `Driver`, `DllFolder`, `Version`; preferences `setpref('obis', ...)`. `Driver` defaults to `'coherent'` when the DLL is in `DllFolder` |
+| `obis.listDevices()` | table `Port`, `Available`, `IsObis`, `Description`, `Idn`. `IsObis` marks Coherent USB devices (vendor `0D4D`, "Coherent OBIS Device" in Device Manager), read from the Windows registry with no traffic; `('Probe', true)` also sends `*IDN?` to each free port |
 | `obis.version()` | package version |
 
 ## `obis.transport.Transport` (abstract handle)
@@ -126,6 +130,16 @@ timeout), `flush()`, and `Description` for records.
 
 `SerialTransport(port, 'BaudRate', 115200)` uses MATLAB's `serialport` with a CR/LF terminator.
 It errors with `obis:SerialTransport:openFailed` and `obis:SerialTransport:notOpen`.
+
+### `obis.transport.CoherentTransport`
+
+`CoherentTransport(port, 'DllFolder', folder)` opens the port through Coherent Connection's own
+serial layer (`CoherentConnectionLibrary.dll`, `ConnectionLibrary.SerialCommunicator`, loaded with
+`NET.addAssembly`; Windows only). Lines pass through unchanged, so `obis.Laser` and its limits
+behave as with `SerialTransport`. `DllFolder` defaults to `defaultDllFolder()`, the Coherent
+Connection 6 install folder; `isAvailable()` says whether the DLL is there. It errors with
+`obis:CoherentTransport:noDll`, `obis:CoherentTransport:openFailed` and
+`obis:CoherentTransport:notOpen`.
 
 ### `obis.transport.SimulatedTransport`
 

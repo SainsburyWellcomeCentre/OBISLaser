@@ -6,5 +6,5 @@ function v = version()
 %   History is in docs/architecture.md, section Milestones.
 %
 % See also obis.config
-    v = '0.1.0';
+    v = '0.2.0';
 end

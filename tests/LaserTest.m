@@ -26,6 +26,32 @@ classdef LaserTest < matlab.unittest.TestCase
             testCase.verifyEqual(testCase.Laser.State, 'Disconnected');
         end
 
+        function aWrongLaserIsRefusedBeforeAnyCommand(testCase)
+            laser = obis.Laser('Transport', testCase.Transport, 'ExpectedWavelengthNm', 488);
+            testCase.verifyError(@() laser.connect(), 'obis:Laser:wrongLaser');
+            testCase.verifyEqual(laser.State, 'Disconnected');
+            testCase.verifyFalse(testCase.Transport.isOpen());
+            sent = {testCase.Transport.Calls.Line};
+            commands = sent(~endsWith(sent, '?') & ~strcmp(sent, 'SYST:COMM:HAND ON'));
+            testCase.verifyEmpty(commands);
+        end
+
+        function theExpectedLaserConnects(testCase)
+            laser = obis.Laser('Transport', testCase.Transport, 'ExpectedWavelengthNm', 561);
+            laser.connect();
+            testCase.addTeardown(@() laser.disconnect());
+            testCase.verifyEqual(laser.State, 'Ready');
+            testCase.verifyError(@() setExpected(laser, 488), 'obis:Laser:portLocked');
+        end
+
+        function expectedWavelengthIsChecked(testCase)
+            testCase.verifyError(@() obis.Laser('ExpectedWavelengthNm', -5), ...
+                'obis:Laser:badValue');
+            laser = obis.Laser('ExpectedWavelengthNm', 488);
+            laser.ExpectedWavelengthNm = [];
+            testCase.verifyEmpty(laser.ExpectedWavelengthNm);
+        end
+
         function connectReadsIdentityAndLimitsAndTurnsEmissionOff(testCase)
             testCase.Transport.open();
             testCase.Transport.writeLine('SOURce:POWer:LEVel:IMMediate:AMPLitude 0.012');
@@ -318,4 +344,10 @@ end
 function setProperty(object, name, value)
 % Sets a property, for verifyError.
 object.(name) = value;
+end
+
+
+function setExpected(laser, nm)
+% Sets ExpectedWavelengthNm, for verifyError.
+laser.ExpectedWavelengthNm = nm;
 end

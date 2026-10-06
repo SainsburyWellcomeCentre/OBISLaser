@@ -2,6 +2,8 @@ classdef Laser < handle
 % obis.Laser controls a Coherent OBIS laser: connection, mode, power, emission and safety.
 %
 %   laser = obis.Laser('Port', 'COM15')        real laser on a serial port
+%   laser = obis.Laser('Port', 'COM15', 'Driver', 'serial')   MATLAB's serialport instead
+%                                              of Coherent's DLL
 %   laser = obis.Laser('Transport', obis.transport.SimulatedTransport())
 %   laser = obis.Laser(..., 'Name', value)     any settable property below
 %
@@ -27,7 +29,19 @@ classdef Laser < handle
 %   Properties (settable)
 %       Port         serial port, e.g. 'COM15' (when no Transport is given; default from
 %                    obis.config, i.e. setpref('obis', 'Port', ...))
-%       BaudRate     default 115200
+%       BaudRate     default 115200 (serial driver only)
+%       Driver       how a Port is opened when no Transport is given: 'coherent'
+%                    (obis.transport.CoherentTransport, Coherent Connection's DLL) or
+%                    'serial' (obis.transport.SerialTransport). Default from obis.config:
+%                    'coherent' when the DLL is installed, else 'serial'
+%       ExpectedWavelengthNm  the laser you mean, when there are several (default []: any),
+%                    within WavelengthToleranceNm (a '488 nm' OBIS reports 489).
+%                    connect reads the wavelength first and refuses another laser
+%                    (obis:Laser:wrongLaser) before sending it any command; obis.findPort
+%                    finds its port
+%       DllFolder    where CoherentConnectionLibrary.dll is, for the 'coherent' driver
+%                    (default from obis.config: setpref('obis', 'DllFolder', ...), else
+%                    the Coherent Connection 6 install folder)
 %       MaxPowermW   your limit: setPower refuses anything above it. Empty until connect,
 %                    which sets it to DeviceMaxPowermW unless you set a lower one. Cannot be
 %                    set above DeviceMaxPowermW, nor below the setpoint already commanded.
@@ -64,7 +78,9 @@ classdef Laser < handle
 %       obis:Laser:limitBelowCommanded  MaxPowermW below CommandedPowermW
 %       obis:Laser:useSetPower     command() given a power command
 %       obis:Laser:busy            a command issued while another waits for its answer
-%       obis:Laser:portLocked      Port or BaudRate changed while connected
+%       obis:Laser:portLocked      Port, BaudRate, Driver, DllFolder or ExpectedWavelengthNm
+%                                  changed while connected
+%       obis:Laser:wrongLaser      the laser on the port is not ExpectedWavelengthNm
 %       Transport errors from open (e.g. obis:SerialTransport:openFailed) pass through.
 %
 %   Example
@@ -95,6 +111,9 @@ classdef Laser < handle
         Port        % serial port, e.g. 'COM15'
         BaudRate    % bits per second
         MaxPowermW  % your power limit, mW
+        Driver      % 'coherent' | 'serial': how a Port is opened
+        DllFolder   % folder holding CoherentConnectionLibrary.dll
+        ExpectedWavelengthNm  % the laser meant, nm, or [] for any
     end
 
     properties
@@ -108,9 +127,16 @@ classdef Laser < handle
         CommandCompleted
     end
 
+    properties (Constant)
+        WavelengthToleranceNm = 5  % how far a reported wavelength may be from the one named
+    end
+
     properties (Access = private)
         PortValue = ''
         BaudRateValue = 115200
+        DriverValue = 'serial'
+        DllFolderValue = ''
+        ExpectedWavelengthValue = []
         MaxPowerValue = []
         OwnsTransport = false
         LogEntries
@@ -129,6 +155,8 @@ classdef Laser < handle
             cfg = obis.config();
             obj.PortValue = cfg.Port;
             obj.BaudRateValue = cfg.BaudRate;
+            obj.DriverValue = cfg.Driver;
+            obj.DllFolderValue = cfg.DllFolder;
             for k = 1:2:numel(varargin)
                 name = char(varargin{k});
                 value = varargin{k + 1};
@@ -139,14 +167,17 @@ classdef Laser < handle
                                 'Transport must be an obis.transport.Transport.');
                         end
                         obj.Transport = value;
-                    case {'port', 'baudrate', 'maxpowermw', 'timeouts', 'verbose', ...
+                    case {'port', 'baudrate', 'driver', 'dllfolder', ...
+                            'expectedwavelengthnm', 'maxpowermw', 'timeouts', 'verbose', ...
                             'logcapacity'}
-                        props = {'Port', 'BaudRate', 'MaxPowermW', 'TimeoutS', 'Verbose', ...
+                        props = {'Port', 'BaudRate', 'Driver', 'DllFolder', ...
+                            'ExpectedWavelengthNm', 'MaxPowermW', 'TimeoutS', 'Verbose', ...
                             'LogCapacity'};
                         obj.(props{strcmpi(props, name)}) = value;
                     otherwise
                         error('obis:Laser:invalidOption', ['Unknown option "%s". Valid: ' ...
-                            'Transport, Port, BaudRate, MaxPowermW, TimeoutS, Verbose, ' ...
+                            'Transport, Port, BaudRate, Driver, DllFolder, ' ...
+                            'ExpectedWavelengthNm, MaxPowermW, TimeoutS, Verbose, ' ...
                             'LogCapacity.'], name);
                 end
             end
@@ -173,8 +204,13 @@ classdef Laser < handle
                         'obis.listDevices) or set a default with setpref(''obis'', ' ...
                         '''Port'', ''COM15'').']);
                 end
-                obj.Transport = obis.transport.SerialTransport(obj.PortValue, ...
-                    'BaudRate', obj.BaudRateValue);
+                if strcmp(obj.DriverValue, 'coherent')
+                    obj.Transport = obis.transport.CoherentTransport(obj.PortValue, ...
+                        'DllFolder', obj.DllFolderValue);
+                else
+                    obj.Transport = obis.transport.SerialTransport(obj.PortValue, ...
+                        'BaudRate', obj.BaudRateValue);
+                end
                 obj.OwnsTransport = true;
             end
             obj.FaultReason = '';
@@ -190,6 +226,15 @@ classdef Laser < handle
                 identity.WavelengthNm = str2double(obj.exchange( ...
                     'SYSTem:INFormation:WAVelength?', true));
                 obj.Identity = identity;
+                expected = obj.ExpectedWavelengthValue;
+                if ~isempty(expected) && ~(abs(identity.WavelengthNm - expected) ...
+                        <= obis.Laser.WavelengthToleranceNm)
+                    error('obis:Laser:wrongLaser', ['The laser on %s is %s (%g nm), not ' ...
+                        'the %g nm laser expected: nothing was sent to it. Find the right ' ...
+                        'port with obis.findPort(''WavelengthNm'', %g).'], ...
+                        obj.Transport.Description, identity.Model, identity.WavelengthNm, ...
+                        expected, expected);
+                end
                 obj.DeviceMaxPowermW = obis.Laser.wattsToMilliwatts(obj.exchange( ...
                     'SOURce:POWer:LIMit:HIGH?', true));
                 obj.DeviceMinPowermW = obis.Laser.wattsToMilliwatts(obj.exchange( ...
@@ -412,6 +457,37 @@ classdef Laser < handle
             obj.BaudRateValue = value;
         end
 
+        function value = get.Driver(obj)
+            value = obj.DriverValue;
+        end
+
+        function set.Driver(obj, value)
+            obj.requireUnlocked('Driver');
+            obj.DriverValue = obis.Laser.checkDriver(value);
+        end
+
+        function value = get.DllFolder(obj)
+            value = obj.DllFolderValue;
+        end
+
+        function set.DllFolder(obj, value)
+            obj.requireUnlocked('DllFolder');
+            obj.DllFolderValue = char(value);
+        end
+
+        function value = get.ExpectedWavelengthNm(obj)
+            value = obj.ExpectedWavelengthValue;
+        end
+
+        function set.ExpectedWavelengthNm(obj, value)
+            obj.requireUnlocked('ExpectedWavelengthNm');
+            if ~isempty(value) && ~(isnumeric(value) && isscalar(value) && value > 0)
+                error('obis:Laser:badValue', ['ExpectedWavelengthNm must be one wavelength ' ...
+                    'in nm, or [] for any laser.']);
+            end
+            obj.ExpectedWavelengthValue = double(value);
+        end
+
         function value = get.MaxPowermW(obj)
             value = obj.MaxPowerValue;
         end
@@ -545,6 +621,15 @@ classdef Laser < handle
         function s = emptyLog()
             % A log with no entries.
             s = struct('Time', {}, 'Command', {}, 'Reply', {}, 'Ok', {}, 'LatencyMs', {});
+        end
+
+        function driver = checkDriver(value)
+            % 'coherent' or 'serial', any letter case; errors otherwise.
+            driver = lower(strtrim(char(value)));
+            if ~any(strcmp(driver, {'coherent', 'serial'}))
+                error('obis:Laser:invalidOption', ['Driver must be ''coherent'' or ' ...
+                    '''serial'', not "%s".'], char(value));
+            end
         end
 
         function mW = wattsToMilliwatts(text)

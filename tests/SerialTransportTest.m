@@ -21,7 +21,7 @@ classdef SerialTransportTest < matlab.unittest.TestCase
         end
 
         function aLaserOnAMissingPortStaysDisconnected(testCase)
-            laser = obis.Laser('Port', 'COM250');
+            laser = obis.Laser('Port', 'COM250', 'Driver', 'serial');
             testCase.verifyError(@() laser.connect(), 'obis:SerialTransport:openFailed');
             testCase.verifyEqual(laser.State, 'Disconnected');
         end

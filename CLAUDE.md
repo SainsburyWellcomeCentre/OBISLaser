@@ -25,12 +25,13 @@ embedded in any MATLAB package doing closed-loop hardware control**, Bpod protoc
 | Milestone | State |
 |---|---|
 | M1: `Laser`, `Mode`, `Calibration`, transports, simulated laser, tests | **Done** (2026-10-05). Moved out of `LuminoseHF` (`laser/LaserModel.m`, the setpoint interpolation of `laser/irradianceToSetpoint_mW.m`) |
-| M2: GUI (`obis.app`) | **Done** on the simulated laser (2026-10-05); no human pass yet |
+| M2: GUI (`obis.app`) | **Done** on the simulated laser (2026-10-05); laid out like Coherent Connection (Start, Stop, power, mode) and embeddable with `'Parent'` (2026-10-06); no human pass yet |
+| M2b: Coherent's DLL as the port (`CoherentTransport`, `Driver`) | **Done** (2026-10-06) against a missing port; not yet on the laser (`rig-checks.md` step 1) |
 | M3: examples, integration guide, README | **Done** |
 | M4: `LuminoseHF` uses the package | Pending |
 | M5: rig verification | Pending (`docs/rig-checks.md`) |
 
-The suite has 71 tests, all passing headless on R2025b in about 5 s, and the Code Analyzer reports
+The suite has 116 tests, all passing headless on R2025b in about 10 s, and the Code Analyzer reports
 zero messages.
 
 The command set has not yet been checked on the laser. The old lab code sent only
@@ -45,8 +46,8 @@ replies. Everything else in `docs/scpi.md` is marked *verify*.
 | Project (edit here, from WSL) | `/mnt/c/Users/harrislab/MATLAB/OBISLaser` |
 | Same path from Windows | `C:\Users\harrislab\MATLAB\OBISLaser` |
 | MATLAB | R2025b (`/mnt/c/Program Files/MATLAB/R2025b/bin/matlab.exe`), base MATLAB only |
-| Laser on Windows | `COM15` at 115200 baud on this rig (`LuminoseHF/luminose_config.yaml`, `laser:`) |
-| Vendor software | Coherent Connection 6 (`C:\Program Files (x86)\Coherent`): holds the port while open |
+| Lasers on Windows | two OBIS lasers, each behind its own OBIS Mini-Controller on its own USB port (2026-10-06): `COM8` 561 nm (operator), `COM15` 488 nm (reports 489). Windows may renumber them, so find them by wavelength: `obis.findPort`. `LuminoseHF` uses only `COM15` (`luminose_config.yaml`, `laser:`) |
+| Vendor software | Coherent Connection 6 (`C:\Program Files (x86)\Coherent\Coherent Connection 6`): holds the port while open; its `CoherentConnectionLibrary.dll` is `CoherentTransport`'s serial layer |
 | Bpod reference (read-only) | `../Bpod_Gen2` |
 | Sibling packages (idioms, read-only) | `../DoricLED`, `../SpinCam`, `../DMDController`, `../LuminoseFM` |
 
@@ -82,8 +83,8 @@ moved. They are harmless, and the path is the operator's to fix.
 
 ### Hardware
 - **Never touch the real laser without the operator's explicit permission for that specific run.**
-  That covers `connect` on a SerialTransport, `obis.listDevices('Probe', true)`, the GUI on a real
-  port, and `tests/hardware/`. Someone may be in the beam path or an animal may be under the
+  That covers `connect` on a SerialTransport or CoherentTransport, `obis.listDevices('Probe',
+  true)`, the GUI on a real port, and `tests/hardware/`. Someone may be in the beam path or an animal may be under the
   objective. Permission covers that request only.
 - The tests and the examples on `SimulatedTransport` need no permission.
 - Before a permitted run:
@@ -112,18 +113,22 @@ moved. They are harmless, and the path is the operator's to fix.
   turned on at connect (D1).
 - Transports only move lines (D2):
   - `SerialTransport`: MATLAB `serialport`
+  - `CoherentTransport`: Coherent Connection's DLL (`ConnectionLibrary.SerialCommunicator`), the
+    default `Driver` where it is installed (D9)
   - `SimulatedTransport`: the laser's answers and state, plus fault injection
 - `obis.Mode` maps each mode to its command and its `AM:SOURce?` reply.
 - `obis.Calibration` is a pure value class that interpolates setpoint and power both ways and
   refuses extrapolation (D7).
-- `obis.gui.LaserApp` is a programmatic uifigure (D8). It owns a laser, or attaches to one
-  without ever disconnecting it.
+- `obis.gui.LaserApp` is a programmatic uifigure (D8), laid out like Coherent Connection's laser
+  panel. It owns a laser, or attaches to one without ever disconnecting it, and with `'Parent'`
+  builds inside a client's GUI: clients host this panel instead of making laser controls.
 
 ## Conventions
 
 - **Layout:**
-  - `+obis/`: `Laser`, `Mode`, `Calibration`, `app`, `config`, `listDevices`, `version`
-  - `+obis/+transport/`: `Transport`, `SerialTransport`, `SimulatedTransport`
+  - `+obis/`: `Laser`, `Mode`, `Calibration`, `app`, `config`, `listDevices`, `findPort`,
+    `version`
+  - `+obis/+transport/`: `Transport`, `SerialTransport`, `CoherentTransport`, `SimulatedTransport`
   - `+obis/+gui/LaserApp.m`
   - `examples/`, `tests/` (`run_tests.m`, test classes, `hardware/`), `docs/`
 - **Help text** follows LuminoseFM's `docs/code-style.md`, and `HelpTextTest` checks it:
@@ -157,15 +162,18 @@ moved. They are harmless, and the path is the operator's to fix.
 
 - `matlab.unittest` class-based tests in `tests/`, run with `tests/run_tests.m` headless. No test
   may touch hardware.
-- The current suite has 71 tests:
-  - `LaserTest` (30)
+- The current suite has 116 tests:
+  - `LaserTest` (33)
   - `CalibrationTest` (8)
   - `SimulatedTransportTest` (9)
-  - `GuiTest` (11)
+  - `GuiTest` (40)
   - `ExamplesTest` (3)
   - `ModeTest` (2)
   - `HelpTextTest` (5)
   - `SerialTransportTest` (3, against a port that does not exist)
+  - `CoherentTransportTest` (5, against a port that does not exist; skipped without the DLL)
+  - `ListDevicesTest` (2, reads Windows' port list and registry only)
+  - `FindPortTest` (6, made-up ports and answers)
 - New behaviour needs a test in the matching class.
 - `tests/hardware/checkLaser.m` is the rig check script. It is run only with permission, and its
   results go in `docs/rig-checks.md`.

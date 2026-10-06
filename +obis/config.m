@@ -5,6 +5,12 @@ function cfg = config(varargin)
 %       RootDir   package root (the folder containing +obis)
 %       Port      default serial port for obis.Laser ('' when none is set)
 %       BaudRate  default bits per second (115200, the OBIS remote's rate)
+%       Driver    how obis.Laser opens a Port: 'coherent' (Coherent Connection's DLL,
+%                 obis.transport.CoherentTransport) when the DLL is in DllFolder, else
+%                 'serial'
+%       DllFolder where CoherentConnectionLibrary.dll is (default: the Coherent Connection
+%                 6 install folder); point it at your own copy with
+%                 setpref('obis', 'DllFolder', folder)
 %       Version   package version (obis.version)
 %
 %   cfg = obis.config('Port', 'COM15') overrides entries for this call. Persistent
@@ -19,9 +25,11 @@ function cfg = config(varargin)
     cfg.RootDir = fileparts(fileparts(mfilename('fullpath')));
     cfg.Port = '';
     cfg.BaudRate = 115200;
+    cfg.Driver = '';  % chosen below, once DllFolder is known
+    cfg.DllFolder = obis.transport.CoherentTransport.defaultDllFolder();
     cfg.Version = obis.version();
 
-    overridable = {'Port', 'BaudRate'};
+    overridable = {'Port', 'BaudRate', 'Driver', 'DllFolder'};
     for k = 1:numel(overridable)
         name = overridable{k};
         if ispref('obis', name)
@@ -40,4 +48,12 @@ function cfg = config(varargin)
         cfg.(overridable{match}) = varargin{k + 1};
     end
     cfg.Port = char(cfg.Port);
+    cfg.DllFolder = char(cfg.DllFolder);
+    if isempty(cfg.Driver)
+        cfg.Driver = 'serial';
+        if obis.transport.CoherentTransport.isAvailable(cfg.DllFolder)
+            cfg.Driver = 'coherent';
+        end
+    end
+    cfg.Driver = obis.Laser.checkDriver(cfg.Driver);
 end
