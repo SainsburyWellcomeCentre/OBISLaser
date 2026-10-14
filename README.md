@@ -100,7 +100,10 @@ obis.app(laser)                 % controls a laser you already connected (left c
 obis.app(laser, 'Parent', tab)  % the same panel inside your own window (a tab, panel or grid)
 ```
 
-**Start**, **Stop** (or Esc), the power and the mode act at once. With two lasers, open one
+**Start**, **Stop** (or Esc), the power and the mode act at once. Tick **Pulse** to have Start
+switch emission on and off at a frequency and duty cycle (software timing, a few ms of jitter;
+at most 25 Hz). Give the window a calibration, `obis.app(laser, 'Calibration', cal)`, and it
+also shows the power at the sample for the setpoint. With two lasers, open one
 window per laser and name it by wavelength, `obis.app('ExpectedWavelengthNm', 488)`: Connect finds
 that laser's port (`obis.findPort`) and refuses any other. See [docs/gui.md](docs/gui.md).
 

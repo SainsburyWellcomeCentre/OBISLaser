@@ -21,6 +21,17 @@ classdef GuiTest < matlab.unittest.TestCase
     end
 
     methods (Test)
+
+        function windowStaysOnTheScreen(testCase)
+            screen = get(groot, 'ScreenSize');
+            app = testCase.App;
+            for unfolded = [false true false]
+                app.showDetails(unfolded);
+                position = app.Figure.Position;
+                testCase.verifyGreaterThanOrEqual(position(2), 50);
+                testCase.verifyLessThanOrEqual(position(2) + position(4), screen(4) - 40 + 1e-9);
+            end
+        end
         function opensWithoutTouchingTheLaser(testCase)
             testCase.verifyEmpty(testCase.Transport.Calls);
             testCase.verifyEqual(testCase.App.Laser.State, 'Disconnected');
@@ -40,6 +51,77 @@ classdef GuiTest < matlab.unittest.TestCase
             testCase.verifySubstring(testCase.App.Controls.Readout.Text, 'mW');
             testCase.press(testCase.App.Controls.Connect);
             testCase.verifyEqual(testCase.App.Laser.State, 'Disconnected');
+        end
+
+        function pulseStartsAndStopStopsIt(testCase)
+            testCase.connectApp();
+            c = testCase.App.Controls;
+            testCase.setValue(c.Frequency, 5);
+            testCase.setValue(c.Duty, 20);
+            testCase.verifySubstring(c.PulseInfo.Text, 'on 40 ms, off 160 ms');
+            testCase.setValue(c.Pulse, true);
+            testCase.press(c.Start);
+            testCase.verifyTrue(testCase.App.Pulser.Running);
+            testCase.verifyEqual(c.Start.Text, 'Pulsing');
+            testCase.verifyEqual(c.Duty.Enable, matlab.lang.OnOffSwitchState('off'));
+            pause(0.5);
+            testCase.press(c.Stop);
+            testCase.verifyFalse(testCase.App.Pulser.Running);
+            testCase.verifyFalse(testCase.Transport.Enabled);
+            testCase.verifyEqual(c.Duty.Enable, matlab.lang.OnOffSwitchState('on'));
+        end
+
+        function lockStopsPulsing(testCase)
+            % A host taking the laser over (a session) leaves no pulsing running under it.
+            testCase.connectApp();
+            c = testCase.App.Controls;
+            testCase.setValue(c.Pulse, true);
+            testCase.press(c.Start);
+            testCase.verifyTrue(testCase.App.Pulser.Running);
+            testCase.App.lock('session running');
+            testCase.verifyFalse(testCase.App.Pulser.Running);
+            testCase.verifyFalse(testCase.Transport.Enabled);
+        end
+
+        function tooShortPhasesAreFlagged(testCase)
+            c = testCase.App.Controls;
+            testCase.setValue(c.Frequency, 20);
+            testCase.setValue(c.Duty, 10);
+            testCase.verifySubstring(c.PulseInfo.Text, 'under 20 ms');
+        end
+
+        function theCalibratedPowerIsShown(testCase)
+            testCase.connectApp();
+            app = testCase.App;
+            app.setCalibration(obis.Calibration([10 50 100], [1 5 10]), 'Out of objective');
+            testCase.setValue(app.Controls.Power, 50);
+            testCase.verifySubstring(app.Controls.Objective.Text, 'Out of objective: 5 mW');
+            testCase.verifySubstring(app.Controls.Objective.Text, 'laser setpoint 50.0 mW');
+            testCase.setValue(app.Controls.Duty, 20);
+            testCase.setValue(app.Controls.Pulse, true);
+            testCase.verifySubstring(app.Controls.Objective.Text, 'average 1 mW at 20 %');
+            testCase.setValue(app.Controls.Power, 120);
+            testCase.verifySubstring(app.Controls.Objective.Text, 'outside the calibration');
+            app.setCalibration([]);
+            testCase.verifyEmpty(app.Controls.Objective.Text);
+        end
+
+        function aLockedPanelIsViewOnlyButStopWorks(testCase)
+            testCase.connectApp();
+            app = testCase.App;
+            app.lock('session running');
+            off = matlab.lang.OnOffSwitchState('off');
+            for name = {'Connect', 'Start', 'Mode', 'Power', 'PowerSlider', 'MaxPower'}
+                testCase.verifyEqual(app.Controls.(name{1}).Enable, off, name{1});
+            end
+            testCase.verifyEqual(app.Controls.Stop.Enable, matlab.lang.OnOffSwitchState('on'));
+            testCase.verifySubstring(app.Controls.State.Text, 'view only: session running');
+            app.refresh();  % stays locked through a redraw
+            testCase.verifyEqual(app.Controls.Start.Enable, off);
+            app.unlock();
+            testCase.verifyEqual(app.Controls.Start.Enable, matlab.lang.OnOffSwitchState('on'));
+            testCase.verifyEqual(app.Controls.Connect.Enable, matlab.lang.OnOffSwitchState('on'));
+            testCase.verifyEmpty(app.LockReason);
         end
 
         function startAndStopSwitchEmission(testCase)

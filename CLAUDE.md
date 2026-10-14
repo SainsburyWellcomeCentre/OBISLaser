@@ -31,7 +31,7 @@ embedded in any MATLAB package doing closed-loop hardware control**, Bpod protoc
 | M4: `LuminoseHF` uses the package | Pending |
 | M5: rig verification | Pending (`docs/rig-checks.md`) |
 
-The suite has 116 tests, all passing headless on R2025b in about 10 s, and the Code Analyzer reports
+The suite has 127 tests, all passing headless on R2025b in about 10 s, and the Code Analyzer reports
 zero messages.
 
 The command set has not yet been checked on the laser. The old lab code sent only
@@ -119,6 +119,9 @@ moved. They are harmless, and the path is the operator's to fix.
 - `obis.Mode` maps each mode to its command and its `AM:SOURce?` reply.
 - `obis.Calibration` is a pure value class that interpolates setpoint and power both ways and
   refuses extrapolation (D7).
+- `obis.Pulser` pulses emission (on and off over the port) at a frequency and duty cycle from two
+  MATLAB timers: ms jitter, each phase at least 20 ms (25 Hz at most). The GUI's **Pulse** row
+  uses it; precise stimulation needs Digital mode and an external TTL.
 - `obis.gui.LaserApp` is a programmatic uifigure (D8), laid out like Coherent Connection's laser
   panel. It owns a laser, or attaches to one without ever disconnecting it, and with `'Parent'`
   builds inside a client's GUI: clients host this panel instead of making laser controls.
@@ -126,7 +129,7 @@ moved. They are harmless, and the path is the operator's to fix.
 ## Conventions
 
 - **Layout:**
-  - `+obis/`: `Laser`, `Mode`, `Calibration`, `app`, `config`, `listDevices`, `findPort`,
+  - `+obis/`: `Laser`, `Mode`, `Calibration`, `Pulser`, `app`, `config`, `listDevices`, `findPort`,
     `version`
   - `+obis/+transport/`: `Transport`, `SerialTransport`, `CoherentTransport`, `SimulatedTransport`
   - `+obis/+gui/LaserApp.m`
@@ -162,11 +165,12 @@ moved. They are harmless, and the path is the operator's to fix.
 
 - `matlab.unittest` class-based tests in `tests/`, run with `tests/run_tests.m` headless. No test
   may touch hardware.
-- The current suite has 116 tests:
+- The current suite has 127 tests:
   - `LaserTest` (33)
   - `CalibrationTest` (8)
   - `SimulatedTransportTest` (9)
-  - `GuiTest` (40)
+  - `GuiTest` (46)
+  - `PulserTest` (5)
   - `ExamplesTest` (3)
   - `ModeTest` (2)
   - `HelpTextTest` (5)

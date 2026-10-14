@@ -5,6 +5,7 @@ obis.app()                          % owns a new obis.Laser (real laser)
 obis.app('Port', 'COM15')           % owned, with options for the laser ('Driver', 'DllFolder')
 obis.app(laser)                     % attaches to a laser you already have
 obis.app(laser, 'Parent', tab)      % the panel inside another GUI's figure, panel, tab or grid
+obis.app(laser, 'Calibration', cal, 'CalibrationLabel', 'Out of objective')  % power at the sample
 obis.app(..., 'Visible', false, 'AutoRefresh', false, 'ShowLog', false)   % for tests
 ```
 
@@ -27,6 +28,8 @@ Laid out like Coherent Connection's laser panel (architecture D8). Always shown:
 | Operating power | Power (mW) field with down and up arrows (by Step, mW), a slider from 0 to Max power, the power as a share of the laser's maximum | at once (Enter, an arrow, releasing the slider) |
 | | Max power (mW): your limit; the field and the slider end there | never (it is a local limit) |
 | | Mode: CW:Power, CW:Current, Digital, Analog, Mixed (`obis.Mode` CWP, CWC, Digital, Analog, Mixed) | at once |
+| | **Pulse**, Frequency (Hz), Duty (%): ticked, Start pulses emission on and off (`obis.Pulser`, from MATLAB timers: a few ms of jitter); beside them the on and off times and the pulses so far, in red when a phase is under 20 ms (25 Hz at most). Stop ends the pulsing and turns emission off; the settings are fixed while it runs | emission on/off each phase |
+| | With a `'Calibration'` (an `obis.Calibration`): *&lt;CalibrationLabel&gt;: P mW (laser setpoint S mW)*, and the average power while pulsing; in red when the setpoint is outside the measured table. `setCalibration(cal, label)` changes it, `[]` hides it | never |
 | **Details** | a toggle arrow, folded at first; unfolds the rows below (`showDetails(tf)` from code). A window of its own grows to fit them | — |
 
 Under Details:
@@ -62,6 +65,10 @@ With `'Parent', container` the panel is a `uipanel` titled *OBIS laser* inside `
 `figure` (a classic one too), `uipanel`, `uitab` or `uigridlayout`. `Root` is that panel and
 `Figure` the host's figure. `close()` deletes only `Root`; the host closes its figure as usual
 (call `close()` from the host's own close function so an owned laser is turned off).
+
+## View only (lock)
+
+`app.lock(reason)` makes the panel view only for a host whose own code drives the laser (LuminoseHF locks it while a session runs): any pulsing stops (emission off), the controls that would change it are disabled and the state reads *(view only: reason)*; Stop (emission off, Esc) and the readback stay usable. `app.unlock()` gives them back; `LockReason` holds the reason ('' when unlocked). Scripts calling the laser object directly are not affected.
 
 ## Behaviour
 

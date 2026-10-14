@@ -103,7 +103,11 @@ operator's request): Start and Stop, Operating power (mW) typed, stepped or drag
 mode, each sent at once; Esc is Stop. A window that owns its laser disconnects it on close; an
 attached one never does. With `'Parent'` the same panel is built inside another GUI (a figure,
 panel, tab or grid layout), so a client such as `LuminoseHF` hosts the laser's panel rather than
-building laser controls of its own; closing it deletes only the panel.
+building laser controls of its own; closing it deletes only the panel. Its **Pulse** row
+(2026-10-12) pulses emission from MATLAB timers (`obis.Pulser`): a visible pulse train with ms
+jitter, not a stimulus clock (Digital mode and a TTL are for that). With a client's
+`obis.Calibration` it also shows the power where that calibration was measured (the client
+names the plane: LuminoseHF says *Out of objective*). The geometry stays with the client.
 
 ### D9. Coherent's DLL is the default way to the port
 
@@ -175,6 +179,7 @@ docs/                 this file, scpi, api-reference, gui, bpod-integration, rig
 |---|---|---|
 | 0.1.0 | 2026-10-05 | M1–M3: package, simulated laser, GUI, examples, docs, 71 tests. Moved out of `LuminoseHF` (`LaserModel`, the setpoint interpolation) |
 | 0.2.0 | 2026-10-06 | `CoherentTransport` and `Driver` (D9); the GUI laid out like Coherent Connection (Start, Stop, power, mode) and embeddable with `'Parent'` (D8); Scan selects the OBIS's port (`listDevices` `IsObis`, from the registry); connection, readback and log folded under Details, Connect scans, `DllFolder`, modes named as in Coherent Connection; `findPort` and `ExpectedWavelengthNm` for several lasers (by `WAVelength?`, ±5 nm: `*IDN?` names the Mini-Controller); the lamp in the laser's wavelength colour; 116 tests |
+| 0.3.0 | 2026-10-12 | `lock`/`unlock` (view only while a host drives the laser); `obis.Pulser` and the GUI's Pulse row (frequency, duty); the calibrated power beside the setpoint (`'Calibration'`, `'CalibrationLabel'`, `setCalibration`); 127 tests |
 
 Next:
 - **M4:** `LuminoseHF` uses `obis.Laser` and `obis.Calibration`.

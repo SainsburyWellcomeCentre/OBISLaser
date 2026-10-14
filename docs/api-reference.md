@@ -111,6 +111,29 @@ Errors:
 - `obis:Calibration:notMonotonic`
 - `obis:Calibration:outOfRange`: nothing is ever extrapolated
 
+## `obis.Pulser` (handle)
+
+```matlab
+p = obis.Pulser(laser, 'FrequencyHz', 5, 'DutyPercent', 20)
+p.start()    % emission on now, then off and on every period
+p.stop()     % ends it, emission off (never throws)
+```
+
+| Member | Meaning |
+|---|---|
+| `FrequencyHz`, `DutyPercent` | settable while stopped (0 < f <= `MaxFrequencyHz`, 25; duty 0 to 100) |
+| `OnS`, `OffS` | each phase's length, s |
+| `Running`, `Cycles`, `Missed` | state, periods started, commands that failed (counted, not thrown) |
+| `MinPhaseS` | 0.02: each phase lasts 0 or at least this long |
+| `check()` | errors unless both phases are long enough |
+
+Software timing (two MATLAB timers sending `SOURce:AM:STATe`): a few ms of jitter, more while
+MATLAB is busy. For precise stimulation use Digital mode and an external TTL. Duty 0 or 100 sets
+emission once, with no timers. Deleting a running Pulser stops it.
+
+Errors: `obis:Pulser:badValue` (out of range, phases too short, or a change while running),
+`obis:Pulser:notReady` (the laser is not connected).
+
 ## Functions
 
 | Function | Does |

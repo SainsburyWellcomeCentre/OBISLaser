@@ -20,6 +20,10 @@ classdef LaserApp < handle
 %   app = obis.gui.LaserApp(..., 'Identify', fcn)   how Connect asks a port's laser (tests)
 %   app = obis.gui.LaserApp(..., 'SavePreferences', false)   a DLL folder chosen in the
 %                                          panel is not kept for next time (tests)
+%   app = obis.gui.LaserApp(..., 'Calibration', cal, 'CalibrationLabel', 'Out of objective')
+%                                          also shows the power where cal was measured
+%                                          (an obis.Calibration) for the setpoint, beside
+%                                          the laser's own
 %
 %   Laid out like Coherent Connection's laser panel. The header shows the laser, its
 %   output power, mode and state, with Start and Stop; its lamp is the laser's wavelength
@@ -36,6 +40,12 @@ classdef LaserApp < handle
 %   while Auto refresh is ticked); and a log. Esc is Stop in a window of its own. See
 %   docs/gui.md.
 %
+%   Pulse: with it ticked, Start switches emission on and off at Frequency (Hz) and Duty
+%   (%) from MATLAB timers (obis.Pulser: a few ms of jitter, each phase at least 20 ms);
+%   the line beside it gives the on and off times. Stop ends it. With a Calibration, a line
+%   gives the power out of the light path (where the calibration was measured) for the
+%   setpoint, and its average while pulsing; outside the calibrated setpoints it says so.
+%
 %   Auto refresh starts ticked for an owned laser and unticked for an attached one: a
 %   protocol that sends commands from its own callbacks must not meet a readback in the
 %   middle of one (obis:Laser:busy).
@@ -48,12 +58,21 @@ classdef LaserApp < handle
 %       Controls    struct of components (for scripting and tests)
 %       LastError   text of the last error shown
 %       LastStatus  struct from the last readback (obis.Laser.status), or []
+%       LockReason  why the panel is view only (lock), or ''
+%       Pulser      the obis.Pulser Start uses while Pulse is ticked
+%       Calibration the obis.Calibration shown (setCalibration), or []
 %
 %   Methods
 %       refresh()   redraw every control from the laser object (no traffic)
 %       showDetails(tf)  unfold or fold away the connection, readback and log
 %       readback()  ask the laser for its live values and show them
-%       close()     close the panel (disconnects only an owned laser)
+%       lock(reason)  view only: every control that would change the laser (Connect,
+%                   Start, power, mode, connection) is disabled and the state says why;
+%                   Stop (emission off, Esc) and readback stay. For a host whose own code
+%                   drives the laser (a running session); any pulsing stops. unlock()
+%                   gives the controls back
+%       setCalibration(cal, label)  show the power where cal was measured ([] hides it)
+%       close()     close the panel (stops any pulsing; disconnects only an owned laser)
 %
 % See also obis.app, obis.Laser
 
@@ -65,6 +84,10 @@ classdef LaserApp < handle
         Controls = struct()   % components, for scripting and tests
         LastError = ''        % last error shown
         LastStatus = []       % last readback
+        LockReason = ''       % why the panel is view only, or ''
+        Pulser = []           % obis.Pulser for Pulse
+        Calibration = []      % obis.Calibration shown beside the setpoint, or []
+        CalibrationLabel = 'At sample'
     end
 
     properties
@@ -81,6 +104,7 @@ classdef LaserApp < handle
     end
 
     properties (Access = private)
+        FoldedHeight = []     % the window's height before Details unfolded
         Listeners = {}
         Timer = []
         Closing = false
@@ -125,6 +149,10 @@ classdef LaserApp < handle
                         obj.Identify = varargin{k + 1};
                     case 'savepreferences'
                         obj.SavePreferences = logical(varargin{k + 1});
+                    case 'calibration'
+                        obj.Calibration = varargin{k + 1};
+                    case 'calibrationlabel'
+                        obj.CalibrationLabel = char(varargin{k + 1});
                     otherwise
                         rest = [rest, varargin(k:min(k + 1, end))]; %#ok<AGROW>
                 end
@@ -133,8 +161,9 @@ classdef LaserApp < handle
                 laser = obis.Laser(rest{:});
             elseif ~isempty(rest)
                 error('obis:LaserApp:invalidOption', ['Only ''Visible'', ''AutoRefresh'', ' ...
-                    '''Parent'', ''ShowLog'', ''ListDevices'', ''Identify'' and ' ...
-                    '''SavePreferences'' can be given when attaching to an existing laser.']);
+                    '''Parent'', ''ShowLog'', ''ListDevices'', ''Identify'', ' ...
+                    '''SavePreferences'', ''Calibration'' and ''CalibrationLabel'' can be ' ...
+                    'given when attaching to an existing laser.']);
             end
             if isempty(autoRefresh)
                 autoRefresh = owns;
@@ -144,6 +173,7 @@ classdef LaserApp < handle
             end
             obj.Laser = laser;
             obj.OwnsLaser = owns;
+            obj.Pulser = obis.Pulser(laser);
             obj.build(parent, visible, autoRefresh, showLog);
             ref = matlab.lang.WeakReference(obj);
             names = {'StateChanged', 'CommandCompleted'};
@@ -178,6 +208,12 @@ classdef LaserApp < handle
                 stop(obj.Timer);
                 delete(obj.Timer);
             end
+            if ~isempty(obj.Pulser) && isvalid(obj.Pulser) && obj.Pulser.Running
+                obj.Pulser.stop();  % no pulsing left behind (it turns emission off)
+            end
+            if ~isempty(obj.Pulser) && isvalid(obj.Pulser)
+                delete(obj.Pulser);
+            end
             cellfun(@delete, obj.Listeners);
             obj.Listeners = {};
             if obj.OwnsLaser && isvalid(obj.Laser)
@@ -190,6 +226,32 @@ classdef LaserApp < handle
             elseif ~isempty(obj.Root) && isvalid(obj.Root)
                 delete(obj.Root);
             end
+        end
+
+        function setCalibration(obj, cal, label)
+            % setCalibration(cal, label) shows the power where cal (an obis.Calibration) was
+            % measured, for the setpoint; [] hides it.
+            obj.Calibration = cal;
+            if nargin > 2 && ~isempty(label)
+                obj.CalibrationLabel = char(label);
+            end
+            obj.refresh();
+        end
+
+        function lock(obj, reason)
+            % lock(reason) makes the panel view only (a host's own code drives the laser).
+            if nargin < 2 || isempty(reason), reason = 'locked'; end
+            if obj.Pulser.Running
+                obj.Pulser.stop();  % the host takes the laser over: no pulsing under it
+            end
+            obj.LockReason = char(reason);
+            obj.refresh();
+        end
+
+        function unlock(obj)
+            % unlock() gives the controls back.
+            obj.LockReason = '';
+            obj.refresh();
         end
 
         function refresh(obj)
@@ -242,6 +304,10 @@ classdef LaserApp < handle
                     'PowerSlider', 'Step', 'Readback'}
                 c.(name{1}).Enable = ready;
             end
+            pulsing = obj.Pulser.Running;
+            c.Pulse.Enable = ~pulsing;  % settings fixed while it runs
+            c.Frequency.Enable = ~pulsing;
+            c.Duty.Enable = ~pulsing;
             if ~isempty(laser.MaxPowermW)
                 top = max(laser.MaxPowermW, eps);
                 c.MaxPower.Value = laser.MaxPowermW;
@@ -257,9 +323,23 @@ classdef LaserApp < handle
                 c.PowerSlider.Value = power;
                 c.Percent.Text = percentText(laser.CommandedPowermW, laser.DeviceMaxPowermW);
             end
+            c.Connect.Enable = true;  % back after unlock
+            if ~isempty(obj.LockReason)  % view only; Stop (emission off) stays, for safety
+                for name = {'Connect', 'Start', 'Mode', 'MaxPower', 'Power', 'PowerDown', ...
+                        'PowerUp', 'PowerSlider', 'Step', 'Port', 'Scan', 'Driver', ...
+                        'Wavelength', 'DllFolder', 'Browse', 'Pulse', 'Frequency', 'Duty'}
+                    c.(name{1}).Enable = false;
+                end
+                c.State.Text = sprintf('%s (view only: %s)', c.State.Text, obj.LockReason);
+            end
             on = laser.IsEnabled && ready;
             c.EmissionLamp.Color = obj.lampColour(on);
             c.Start.Text = ternary(on, 'Emitting', 'Start');
+            if obj.Pulser.Running
+                c.Start.Text = 'Pulsing';
+            end
+            obj.showPulse();
+            obj.showObjective();
             obj.showHeader();
             obj.showLog();
         end
@@ -268,17 +348,25 @@ classdef LaserApp < handle
             % showDetails(tf) unfolds (true) or folds away (false) the readback and the log.
             tf = logical(tf);
             c = obj.Controls;
+            wasOpen = logical(c.DetailsArea.Visible);  % already as asked: the window stays
             c.Details.Value = tf;
             c.Details.Text = [char(ternary(tf, 9662, 9656)) '  Details'];
             c.DetailsArea.Visible = tf;
             extra = ternary(isempty(c.Log), 220, 380);  % px the details take
             obj.Grid.RowHeight{end} = ternary(tf, ternary(isempty(c.Log), 'fit', '1x'), 0);
-            if obj.OwnsFigure && ~isempty(obj.Figure) && isvalid(obj.Figure)
+            if obj.OwnsFigure && tf ~= wasOpen && ~isempty(obj.Figure) && isvalid(obj.Figure)
                 position = obj.Figure.Position;
-                grow = ternary(tf, extra, -extra);
-                % grows downwards, keeping the title bar where it is, but never off screen
-                obj.Figure.Position = [position(1), max(position(2) - grow, 40), ...
-                    position(3), position(4) + grow];
+                top = position(2) + position(4);
+                if tf
+                    obj.FoldedHeight = position(4);  % to fold back to exactly this
+                    height = position(4) + extra;
+                elseif ~isempty(obj.FoldedHeight)
+                    height = obj.FoldedHeight;
+                else
+                    height = position(4) - extra;
+                end
+                % grows downwards, keeping the title bar where it is, all on the screen
+                obj.Figure.Position = onScreen([position(1), top - height, position(3), height]);
             end
         end
 
@@ -295,7 +383,7 @@ classdef LaserApp < handle
         function build(obj, parent, visible, autoRefresh, showLog)
             % Lays out the panel, in a window of its own or inside parent.
             if isempty(parent)
-                fig = uifigure('Name', 'OBIS laser', 'Position', [100 300 600 300], ...
+                fig = uifigure('Name', 'OBIS laser', 'Position', onScreen([100 Inf 640 300]), ...
                     'Visible', matlab.lang.OnOffSwitchState(visible), ...
                     'CloseRequestFcn', @(~, ~) obj.close(), ...
                     'KeyPressFcn', @(~, evt) obj.onKey(evt));
@@ -343,8 +431,8 @@ classdef LaserApp < handle
                 'FontColor', [0.45 0.45 0.45]);
 
             panel = uipanel(grid, 'Title', 'Operating power');
-            inner = uigridlayout(panel, [4 6], 'ColumnWidth', {'fit', 34, 80, 34, 'fit', '1x'}, ...
-                'RowHeight', {'fit', 'fit', 'fit', 'fit'});
+            inner = uigridlayout(panel, [6 6], 'ColumnWidth', {'fit', 34, 80, 34, 'fit', '1x'}, ...
+                'RowHeight', {'fit', 'fit', 'fit', 'fit', 'fit', 'fit'});
             uilabel(inner, 'Text', 'Power (mW)');
             c.PowerDown = uibutton(inner, 'Text', char(9660), 'Tooltip', 'Down by Step', ...
                 'ButtonPushedFcn', @(~, ~) obj.onStep(-1));
@@ -372,6 +460,30 @@ classdef LaserApp < handle
             c.Mode = uidropdown(inner, 'Items', obj.ModeLabels, 'ItemsData', obj.Modes, ...
                 'ValueChangedFcn', @(src, ~) obj.onMode(src.Value));
             c.Mode.Layout.Column = [2 4];
+            c.Pulse = uicheckbox(inner, 'Text', 'Pulse', 'Value', false, ...
+                'Tooltip', ['Start switches emission on and off at this frequency and duty ' ...
+                '(from MATLAB: a few ms of jitter)'], 'ValueChangedFcn', @(~, ~) obj.refresh());
+            c.Pulse.Layout.Row = 5;
+            c.Pulse.Layout.Column = 1;
+            c.Frequency = uieditfield(inner, 'numeric', 'Value', obj.Pulser.FrequencyHz, ...
+                'Limits', [0 obis.Pulser.MaxFrequencyHz], 'LowerLimitInclusive', 'off', ...
+                'ValueDisplayFormat', '%g Hz', 'Tooltip', 'Pulses per second', ...
+                'ValueChangedFcn', @(src, ~) obj.onPulseSetting('FrequencyHz', src));
+            c.Frequency.Layout.Row = 5;
+            c.Frequency.Layout.Column = [2 3];
+            c.Duty = uieditfield(inner, 'numeric', 'Value', obj.Pulser.DutyPercent, ...
+                'Limits', [0 100], 'ValueDisplayFormat', '%g %%', ...
+                'Tooltip', 'Share of each period with emission on', ...
+                'ValueChangedFcn', @(src, ~) obj.onPulseSetting('DutyPercent', src));
+            c.Duty.Layout.Row = 5;
+            c.Duty.Layout.Column = [4 5];
+            c.PulseInfo = uilabel(inner, 'Text', '', 'FontColor', [0.45 0.45 0.45]);
+            c.PulseInfo.Layout.Row = 5;
+            c.PulseInfo.Layout.Column = 6;
+            c.Objective = uilabel(inner, 'Text', '', 'FontWeight', 'bold', 'WordWrap', 'on');
+            c.Objective.UserData = c.Objective.FontColor;  % the theme's, restored after a warning
+            c.Objective.Layout.Row = 6;
+            c.Objective.Layout.Column = [1 6];
 
             c.Details = uibutton(grid, 'state', 'Text', [char(9656) '  Details'], ...
                 'Value', false, 'HorizontalAlignment', 'left', ...
@@ -583,13 +695,83 @@ classdef LaserApp < handle
         end
 
         function onStart(obj)
-            % Emission on.
-            obj.guard(@() obj.Laser.setEnabled(true));
+            % Emission on, or pulsing while Pulse is ticked.
+            if obj.Controls.Pulse.Value
+                obj.guard(@() obj.Pulser.start());
+            else
+                obj.guard(@() obj.Laser.setEnabled(true));
+            end
             obj.refresh();
+        end
+
+        function onPulseSetting(obj, name, src)
+            % A frequency or duty typed; a refusal puts the last one back.
+            if ~obj.guard(@() setProperty(obj.Pulser, name, src.Value))
+                src.Value = obj.Pulser.(name);
+            end
+            obj.refresh();
+        end
+
+        function showPulse(obj)
+            % The on and off times, or why they cannot be.
+            c = obj.Controls;
+            p = obj.Pulser;
+            try
+                p.check();
+                if p.DutyPercent == 0
+                    c.PulseInfo.Text = 'off throughout';
+                elseif p.DutyPercent == 100
+                    c.PulseInfo.Text = 'on throughout';
+                else
+                    c.PulseInfo.Text = sprintf('on %.0f ms, off %.0f ms', 1000 * p.OnS, ...
+                        1000 * p.OffS);
+                end
+                c.PulseInfo.FontColor = [0.45 0.45 0.45];
+            catch
+                c.PulseInfo.Text = sprintf('phases under %g ms', 1000 * p.MinPhaseS);
+                c.PulseInfo.FontColor = obj.Danger;
+            end
+            if p.Running
+                c.PulseInfo.Text = sprintf('%s; %d pulses', c.PulseInfo.Text, p.Cycles);
+            end
+        end
+
+        function showObjective(obj)
+            % The power where the calibration was measured, for the setpoint (and its average
+            % while pulsing).
+            c = obj.Controls;
+            cal = obj.Calibration;
+            setpoint = obj.Laser.CommandedPowermW;
+            if isempty(cal)
+                c.Objective.Text = '';
+                return
+            end
+            if isempty(setpoint)
+                c.Objective.Text = sprintf('%s: - (no setpoint yet)', obj.CalibrationLabel);
+                return
+            end
+            try
+                power = cal.powerFor(setpoint);
+                text = sprintf('%s: %.3g mW   (laser setpoint %.1f mW)', obj.CalibrationLabel, ...
+                    power, setpoint);
+                duty = obj.Pulser.DutyPercent;
+                if c.Pulse.Value && duty < 100
+                    text = sprintf('%s;  average %.3g mW at %g %%', text, power * duty / 100, duty);
+                end
+                c.Objective.FontColor = c.Objective.UserData;
+            catch
+                text = sprintf(['%s: outside the calibration (laser setpoints %.1f to %.1f mW ' ...
+                    'measured)'], obj.CalibrationLabel, cal.SetpointmW(1), cal.SetpointmW(end));
+                c.Objective.FontColor = obj.Danger;
+            end
+            c.Objective.Text = text;
         end
 
         function onStop(obj)
             % Emission off, whatever else is happening.
+            if obj.Pulser.Running
+                obj.Pulser.stop();
+            end
             if ~obj.Laser.stopAll() && ~strcmp(obj.Laser.State, 'Disconnected')
                 obj.showError('Stop was not confirmed by the laser. Check it by eye.');
             end
@@ -838,4 +1020,16 @@ if condition
 else
     value = b;
 end
+end
+
+
+function position = onScreen(position)
+% position [x y width height] moved, and shortened if need be, so that the whole window,
+% title bar included, is on the screen (above the taskbar).
+screen = get(groot, 'ScreenSize');
+topMargin = 40;     % the title bar
+bottomMargin = 50;  % the taskbar
+position(4) = min(position(4), screen(4) - topMargin - bottomMargin);
+position(2) = min(position(2), screen(4) - topMargin - position(4));
+position(2) = max(position(2), bottomMargin);
 end
